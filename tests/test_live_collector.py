@@ -254,6 +254,71 @@ def test_filter_breakdown_metrics(tmp_path):
     assert "filter_reason,matched_pattern" in lines[0]
     assert "sysmon" in lines[1]
     assert "collector" in lines[2]
-    assert "noise_pattern" in lines[3]
+    assert "drop_pattern" in lines[3]
+
+
+def test_claude_telemetry_tagged_not_dropped(tmp_path):
+    """Test Claude sentry\\session.json is written to DB with noise_candidate=1,
+    while Prefetch and collector events are dropped and not written to DB.
+    """
+    db_file = str(tmp_path / "test_claude_tag.db")
+    audit_file = str(tmp_path / "test_claude_audit.csv")
+    collector = LiveSysmonCollector(db_path=db_file, backfill=False)
+    collector.audit_csv_path = audit_file
+
+    claude_path = r"C:\Users\User\AppData\Local\Packages\Claude_xyz123\LocalCache\Roaming\Claude\sentry\session.json"
+    prefetch_path = r"C:\Windows\Prefetch\CLAUDE.EXE-A1B2C3D4.pf"
+    collector_path = r"D:\KERNAL PROTECT\privacyguard\data\privacyguard.db"
+
+    claude_ev = generate_mock_event(record_id=201, ts=time.time(), is_file=True, image_path=claude_path)
+    claude_ev["proc_key"] = "{claude-guid-1111}"
+    claude_ev["image"] = r"C:\Users\User\AppData\Local\Programs\Claude\Claude.exe"
+
+    prefetch_ev = generate_mock_event(record_id=202, ts=time.time(), is_file=True, image_path=prefetch_path)
+    prefetch_ev["proc_key"] = "{system-prefetch-guid}"
+
+    collector_ev = generate_mock_event(record_id=203, ts=time.time(), is_file=True, image_path=collector_path)
+    collector_ev["pid"] = os.getpid()
+
+    # Process all three events
+    assert collector.process_event(claude_ev, None, None) is True
+    assert collector.process_event(prefetch_ev, None, None) is False
+    assert collector.process_event(collector_ev, None, None) is False
+
+    assert collector.total_received == 3
+    assert collector.tagged_count == 1
+    assert collector.filtered_drop_patterns == 1
+    assert collector.filtered_collector == 1
+
+    # Drain event queue and write to store
+    batch = []
+    while not collector.event_queue.empty():
+        batch.append(collector.event_queue.get_nowait()[0])
+    inserted = collector.store.insert_events_batch(batch)
+    assert inserted == 1
+
+    # Verify database contents: exactly 1 event (Claude telemetry)
+    assert collector.store.get_event_count() == 1
+    rows = collector.store.get_events(limit=10)
+    assert len(rows) == 1
+    stored_ev = rows[0]
+    assert stored_ev["path"] == claude_path
+
+    # Verify noise_candidate=1 in extra_json
+    import json
+    extra = json.loads(stored_ev["extra_json"])
+    assert extra.get("noise_candidate") == 1
+    assert extra.get("event_record_id") == 201
+
+    # Verify filtered audit log: Prefetch and collector are logged, Claude is NOT logged
+    assert os.path.exists(audit_file)
+    with open(audit_file, "r", encoding="utf-8") as f:
+        audit_content = f.read()
+    assert "CLAUDE.EXE" in audit_content or "Prefetch" in audit_content
+    assert "collector" in audit_content
+    assert "session.json" not in audit_content
+
+    collector.store.close()
+
 
 

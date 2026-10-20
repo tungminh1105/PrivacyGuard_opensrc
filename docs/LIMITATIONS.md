@@ -45,3 +45,11 @@ This document outlines key limitations of the current telemetry and detection ar
   - Machine learning models (rules baseline, Isolation Forest, Autoencoder, LSTM) cannot be reliably trained on a single brief measurement session.
   - As mandated by SPEC Section 8, training requires comprehensive benign baseline data collected over multiple days across diverse normal workloads (web browsing, office productivity, cloud synchronization, OS updates).
   - Training on a single brief capture would cause severe overfitting, high false positive rates, and poor generalization.
+
+---
+
+## 6. Heuristic Noise Tagging vs. True Telemetry (tag_patterns Assumption)
+- **Design Decision**: In order to avoid dropping authentic application activity, high-volume app data paths (`\AppData\Local\Packages\`, `\AppData\Local\Temp`, browser caches, `Code Cache`, `INetCache`) are retained in the `events` table rather than dropped, and flagged with `noise_candidate=1` inside `extra_json`.
+- **Limitation & Hypothesis**: The current list of `tag_patterns` in `config.yaml` is an operational heuristic/assumption that requires empirical validation during Phase D (Modeling & Anomaly Detection).
+- **Risk of Mislabeling**: Genuine application telemetry (such as Anthropic Claude's `sentry\scope_v3.json` and `sentry\session.json`, or embedded web engines like `msedgewebview2` in Office Hub) routinely writes to and reads from these directory patterns. Tagging these locations as noise candidates may lead downstream feature extraction or detection models to misidentify legitimate application behavior as benign noise, potentially masking data flows if not properly calibrated during Phase D.
+

@@ -107,21 +107,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "noise_filters": {
         "enabled": True,
-        "path_patterns": [
+        "drop_patterns": [
             "C:\\Windows\\Prefetch",
-            "C:\\Windows\\System32\\LogFiles",
-            "C:\\Windows\\Temp",
             "C:\\Windows\\WinSxS",
             "$Mft",
             "pagefile.sys",
             "swapfile.sys",
-            "\\AppData\\Local\\Temp",
-            "\\AppData\\Local\\Microsoft\\Windows\\INetCache",
-            "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache",
-            "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Code Cache",
-            "\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache",
-            "\\AppData\\Local\\Packages\\",
             "\\Microsoft\\Windows\\Recent\\",
+        ],
+        "tag_patterns": [
+            "\\AppData\\Local\\Temp",
+            "\\AppData\\Local\\Packages\\",
+            "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache",
+            "Code Cache",
+            "\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache",
+            "\\AppData\\Local\\Microsoft\\Windows\\INetCache",
         ],
         "ignore_processes": ["privacyguard", "python.exe"],
     },
@@ -301,32 +301,81 @@ class SysmonParser:
             "DestinationPortName", "TargetFilename", "CreationUtcTime"
         })
 
-    def is_noise(self, event: Dict[str, Any]) -> bool:
-        """Check if an event matches noise filtering rules in config, or belongs to Sysmon / collector."""
+    def check_drop_reason(self, event: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+        """Check if an event matches a dropping condition (Sysmon binary, collector process, or drop_patterns).
+
+        Returns:
+            (reason, matched_pattern) or (None, None)
+        """
         path = event.get("path") or ""
+        image = event.get("image") or ""
         lower_path = path.lower() if path else ""
+        lower_image = image.lower() if image else ""
 
-        # Filter sysmon service/executable itself
-        if "sysmon" in lower_path:
-            return True
+        # 1. Filter sysmon service/executable itself
+        if "sysmon" in lower_path or "sysmon" in lower_image:
+            pattern = path if "sysmon" in lower_path else image
+            return "sysmon", pattern
 
-        # Filter collector's own process by PID or cached GUID
+        # 2. Filter collector's own process by PID or cached GUID
         collector_pid = os.getpid()
         if event.get("pid") == collector_pid:
-            return True
+            return "collector", f"collector_pid={collector_pid}"
         if self.collector_guid and event.get("proc_key") == self.collector_guid:
-            return True
+            return "collector", f"collector_guid={self.collector_guid}"
 
         filters = self.config.get("noise_filters", {})
         if not filters.get("enabled", True):
-            return False
+            return None, None
 
-        if lower_path:
-            for pattern in filters.get("path_patterns", []):
-                if pattern.lower() in lower_path:
-                    return True
+        drop_patterns = filters.get("drop_patterns")
+        if drop_patterns is None:
+            drop_patterns = filters.get("path_patterns", [])
 
-        return False
+        norm_path = lower_path.replace("/", "\\")
+        norm_image = lower_image.replace("/", "\\")
+
+        for pattern in drop_patterns:
+            pat_norm = pattern.lower().replace("/", "\\")
+            if (norm_path and pat_norm in norm_path) or (norm_image and pat_norm in norm_image):
+                return "drop_pattern", pattern
+
+        return None, None
+
+    def check_tag_pattern(self, event: Dict[str, Any]) -> Optional[str]:
+        """Check if an event matches tag_patterns for noise candidates.
+
+        Returns:
+            matched_pattern or None
+        """
+        filters = self.config.get("noise_filters", {})
+        if not filters.get("enabled", True):
+            return None
+
+        path = event.get("path") or ""
+        image = event.get("image") or ""
+        lower_path = path.lower() if path else ""
+        lower_image = image.lower() if image else ""
+
+        norm_path = lower_path.replace("/", "\\")
+        norm_image = lower_image.replace("/", "\\")
+
+        tag_patterns = filters.get("tag_patterns", [])
+        for pattern in tag_patterns:
+            pat_norm = pattern.lower().replace("/", "\\")
+            if (norm_path and pat_norm in norm_path) or (norm_image and pat_norm in norm_image):
+                return pattern
+
+        return None
+
+    def is_drop(self, event: Dict[str, Any]) -> bool:
+        """Check if an event should be dropped completely."""
+        reason, _ = self.check_drop_reason(event)
+        return reason is not None
+
+    def is_noise(self, event: Dict[str, Any]) -> bool:
+        """Alias for is_drop to preserve API compatibility."""
+        return self.is_drop(event)
 
     def normalize_event(
         self,
@@ -451,6 +500,10 @@ class SysmonParser:
                 }
             else:
                 path = raw_target_fn
+
+        # Check if event matches tag_patterns to flag noise_candidate=1
+        if self.check_tag_pattern({"path": path, "image": fields.get(image_field)}):
+            extra_json["noise_candidate"] = 1
 
         event_record = {
             "ts": ts,
@@ -585,7 +638,7 @@ class SysmonParser:
                 continue
             ev, pr, zn = self.parse_text_block(b)
             if ev is not None:
-                if filter_noise and self.is_noise(ev):
+                if filter_noise and self.is_drop(ev):
                     continue
                 results.append((ev, pr, zn))
         return results
@@ -618,14 +671,23 @@ class LiveSysmonCollector:
         self.running = False
         self.total_received = 0
         self.total_written = 0
+        self.tagged_count = 0
         self.dropped_events = 0
         self.historical_count = 0
         self.start_ts = 0.0
         self.filtered_sysmon = 0
         self.filtered_collector = 0
-        self.filtered_noise_pattern = 0
+        self.filtered_drop_patterns = 0
         self.audit_csv_path: Optional[str] = "data/filtered_audit.csv"
         self._audit_header_written: bool = False
+
+    @property
+    def filtered_noise_pattern(self) -> int:
+        return self.filtered_drop_patterns
+
+    @filtered_noise_pattern.setter
+    def filtered_noise_pattern(self, val: int) -> None:
+        self.filtered_drop_patterns = val
 
     def _writer_worker(self) -> None:
         """Background thread worker to flush queued events to SQLite store in batches."""
@@ -662,37 +724,12 @@ class LiveSysmonCollector:
             event_batch.clear()
 
     def check_filter_reason(self, ev: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-        """Check if an event matches a filtering condition.
+        """Check if an event matches a dropping condition (Sysmon, collector, drop_patterns).
 
         Returns:
             (reason, matched_pattern) or (None, None)
         """
-        path = ev.get("path") or ""
-        image = ev.get("image") or ""
-        lower_path = path.lower() if path else ""
-        lower_image = image.lower() if image else ""
-
-        # 1. Filter sysmon binary itself
-        if "sysmon" in lower_path or "sysmon" in lower_image:
-            pattern = path if "sysmon" in lower_path else image
-            return "sysmon", pattern
-
-        # 2. Filter collector's own process
-        collector_pid = os.getpid()
-        if ev.get("pid") == collector_pid:
-            return "collector", f"collector_pid={collector_pid}"
-        if self.parser.collector_guid and ev.get("proc_key") == self.parser.collector_guid:
-            return "collector", f"collector_guid={self.parser.collector_guid}"
-
-        # 3. Filter noise patterns
-        filters = self.config.get("noise_filters", {})
-        if filters.get("enabled", True):
-            for pattern in filters.get("path_patterns", []):
-                pat_lower = pattern.lower()
-                if (lower_path and pat_lower in lower_path) or (lower_image and pat_lower in lower_image):
-                    return "noise_pattern", pattern
-
-        return None, None
+        return self.parser.check_drop_reason(ev)
 
     def log_filtered_event(
         self,
@@ -763,10 +800,23 @@ class LiveSysmonCollector:
             self.filtered_collector += 1
             self.log_filtered_event(ev, pr, reason, matched_pattern or "collector")
             return False
-        elif reason == "noise_pattern":
-            self.filtered_noise_pattern += 1
-            self.log_filtered_event(ev, pr, reason, matched_pattern or "noise_pattern")
+        elif reason in ("drop_pattern", "noise_pattern"):
+            self.filtered_drop_patterns += 1
+            self.log_filtered_event(ev, pr, "drop_pattern", matched_pattern or "drop_pattern")
             return False
+
+        # Tag candidate noise patterns in extra_json without dropping
+        matched_tag = self.parser.check_tag_pattern(ev)
+        has_tag_flag = (
+            isinstance(ev.get("extra_json"), dict)
+            and ev["extra_json"].get("noise_candidate") == 1
+        )
+        if matched_tag or has_tag_flag:
+            if ev.get("extra_json") is None:
+                ev["extra_json"] = {}
+            if isinstance(ev["extra_json"], dict):
+                ev["extra_json"]["noise_candidate"] = 1
+            self.tagged_count += 1
 
         try:
             self.event_queue.put_nowait((ev, pr, zn))
@@ -849,7 +899,7 @@ class LiveSysmonCollector:
 
     def print_metrics(self) -> None:
         """Print summary session metrics including dropped ratio and filter breakdown."""
-        total_filtered = self.filtered_sysmon + self.filtered_collector + self.filtered_noise_pattern
+        total_filtered_drop = self.filtered_sysmon + self.filtered_collector + self.filtered_drop_patterns
         dropped_ratio = (
             (self.dropped_events / self.total_received * 100.0) if self.total_received > 0 else 0.0
         )
@@ -861,13 +911,14 @@ class LiveSysmonCollector:
             print(f"  Historical events:     {self.historical_count}")
         print(f"  Total events received: {self.total_received}")
         print(f"  Total events written:  {self.total_written}")
-        print(f"  Total events filtered: {total_filtered}")
-        print(f"    - Filtered (Sysmon binary):     {self.filtered_sysmon}")
-        print(f"    - Filtered (Collector process): {self.filtered_collector}")
-        print(f"    - Filtered (Noise patterns):    {self.filtered_noise_pattern}")
+        print(f"  Tagged count (noise):  {self.tagged_count} (noise_candidate=1)")
+        print(f"  Total events dropped:  {total_filtered_drop}")
+        print(f"    - Drop (Sysmon binary):        {self.filtered_sysmon}")
+        print(f"    - Drop (Collector process):    {self.filtered_collector}")
+        print(f"    - Drop (System drop_patterns): {self.filtered_drop_patterns}")
         if self.audit_csv_path:
             print(f"  Filtered audit log:    {self.audit_csv_path}")
-        print(f"  Dropped events:        {self.dropped_events}")
+        print(f"  Buffer overflow drops: {self.dropped_events}")
         print(f"  Dropped ratio:         {dropped_ratio:.2f}% (SPEC requirement: < 1.0%)")
         print("=" * 55 + "\n")
 
@@ -917,7 +968,7 @@ class LiveSysmonCollector:
                     elapsed = now - self.start_ts
                     print(
                         f"[{elapsed:3.0f}s] Live status: {self.total_received} events received, "
-                        f"{self.total_written} written, {self.dropped_events} dropped (current watermark: {self.watermark})",
+                        f"{self.total_written} written ({self.tagged_count} tagged), {self.dropped_events} dropped (current watermark: {self.watermark})",
                         flush=True,
                     )
                     last_heartbeat = now

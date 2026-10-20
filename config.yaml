@@ -55,21 +55,20 @@ sysmon:
 
 noise_filters:
   enabled: true
-  path_patterns:
+  drop_patterns:
     - "C:\\Windows\\Prefetch"
-    - "C:\\Windows\\System32\\LogFiles"
-    - "C:\\Windows\\Temp"
     - "C:\\Windows\\WinSxS"
     - "$Mft"
     - "pagefile.sys"
     - "swapfile.sys"
-    - "\\AppData\\Local\\Temp"
-    - "\\AppData\\Local\\Microsoft\\Windows\\INetCache"
-    - "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache"
-    - "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Code Cache"
-    - "\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache"
-    - "\\AppData\\Local\\Packages\\"
     - "\\Microsoft\\Windows\\Recent\\"
+  tag_patterns:
+    - "\\AppData\\Local\\Temp"
+    - "\\AppData\\Local\\Packages\\"
+    - "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache"
+    - "Code Cache"
+    - "\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache"
+    - "\\AppData\\Local\\Microsoft\\Windows\\INetCache"
   ignore_processes:
     - "privacyguard"
     - "python.exe"

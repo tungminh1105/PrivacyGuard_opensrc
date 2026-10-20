@@ -122,7 +122,7 @@ def test_deduplication(parser):
 
 
 def test_noise_filtering(parser):
-    """Verify system noise filtering removes Prefetch and app cache paths."""
+    """Verify system noise filtering drops Prefetch and tags app cache paths."""
     noise_event = {
         "ts": 1700000000.0,
         "pid": 100,
@@ -132,6 +132,8 @@ def test_noise_filtering(parser):
         "path": "C:\\Windows\\Prefetch\\CMD.EXE-A1B2C3D4.pf",
     }
     assert parser.is_noise(noise_event) is True
+    assert parser.is_drop(noise_event) is True
+    assert parser.check_tag_pattern(noise_event) is None
 
     app_cache_event = {
         "ts": 1700000000.0,
@@ -141,7 +143,10 @@ def test_noise_filtering(parser):
         "type": "file_create",
         "path": "C:\\Users\\User\\AppData\\Local\\Packages\\SomeApp\\LocalCache\\cache.json",
     }
-    assert parser.is_noise(app_cache_event) is True
+    # AppData\Local\Packages\ is a tag pattern, NOT dropped
+    assert parser.is_noise(app_cache_event) is False
+    assert parser.is_drop(app_cache_event) is False
+    assert parser.check_tag_pattern(app_cache_event) is not None
 
     user_doc_event = {
         "ts": 1700000000.0,
@@ -152,6 +157,8 @@ def test_noise_filtering(parser):
         "path": "C:\\Users\\User\\Documents\\FakeDocuments\\contract.docx",
     }
     assert parser.is_noise(user_doc_event) is False
+    assert parser.is_drop(user_doc_event) is False
+    assert parser.check_tag_pattern(user_doc_event) is None
 
 
 def test_xml_event_parsing(parser):
