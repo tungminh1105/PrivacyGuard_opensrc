@@ -9,6 +9,7 @@ Filters collector process and Sysmon binary events.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -462,6 +463,7 @@ class SysmonParser:
             "dest_port": dest_port,
             "proto": proto,
             "nbytes": 0,
+            "image": fields.get(image_field),
             "extra_json": extra_json if extra_json else None,
         }
 
@@ -622,6 +624,8 @@ class LiveSysmonCollector:
         self.filtered_sysmon = 0
         self.filtered_collector = 0
         self.filtered_noise_pattern = 0
+        self.audit_csv_path: Optional[str] = "data/filtered_audit.csv"
+        self._audit_header_written: bool = False
 
     def _writer_worker(self) -> None:
         """Background thread worker to flush queued events to SQLite store in batches."""
@@ -657,30 +661,89 @@ class LiveSysmonCollector:
             self.total_written += inserted
             event_batch.clear()
 
-    def check_filter_reason(self, ev: Dict[str, Any]) -> Optional[str]:
-        """Check if an event matches a filtering condition and return the specific reason."""
+    def check_filter_reason(self, ev: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+        """Check if an event matches a filtering condition.
+
+        Returns:
+            (reason, matched_pattern) or (None, None)
+        """
         path = ev.get("path") or ""
+        image = ev.get("image") or ""
         lower_path = path.lower() if path else ""
+        lower_image = image.lower() if image else ""
 
         # 1. Filter sysmon binary itself
-        if "sysmon" in lower_path:
-            return "sysmon"
+        if "sysmon" in lower_path or "sysmon" in lower_image:
+            pattern = path if "sysmon" in lower_path else image
+            return "sysmon", pattern
 
         # 2. Filter collector's own process
         collector_pid = os.getpid()
         if ev.get("pid") == collector_pid:
-            return "collector"
+            return "collector", f"collector_pid={collector_pid}"
         if self.parser.collector_guid and ev.get("proc_key") == self.parser.collector_guid:
-            return "collector"
+            return "collector", f"collector_guid={self.parser.collector_guid}"
 
         # 3. Filter noise patterns
         filters = self.config.get("noise_filters", {})
-        if filters.get("enabled", True) and lower_path:
+        if filters.get("enabled", True):
             for pattern in filters.get("path_patterns", []):
-                if pattern.lower() in lower_path:
-                    return "noise_pattern"
+                pat_lower = pattern.lower()
+                if (lower_path and pat_lower in lower_path) or (lower_image and pat_lower in lower_image):
+                    return "noise_pattern", pattern
 
-        return None
+        return None, None
+
+    def log_filtered_event(
+        self,
+        ev: Dict[str, Any],
+        pr: Optional[Dict[str, Any]],
+        reason: str,
+        matched_pattern: str,
+    ) -> None:
+        """Write a filtered event record to data/filtered_audit.csv."""
+        if not self.audit_csv_path:
+            return
+
+        image = ev.get("image") or (pr.get("exe_path") if pr else "") or ""
+        ev_type = ev.get("type", "")
+        if ev_type == "net_connect":
+            path_or_dest = f"{ev.get('dest_ip')}:{ev.get('dest_port')}"
+        else:
+            path_or_dest = ev.get("path") or ""
+
+        try:
+            if not self._audit_header_written:
+                dirname = os.path.dirname(self.audit_csv_path)
+                if dirname and not os.path.exists(dirname):
+                    os.makedirs(dirname, exist_ok=True)
+                if not os.path.exists(self.audit_csv_path) or os.path.getsize(self.audit_csv_path) == 0:
+                    with open(self.audit_csv_path, "w", encoding="utf-8", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            "ts",
+                            "proc_key",
+                            "Image",
+                            "type",
+                            "path_or_dest",
+                            "filter_reason",
+                            "matched_pattern",
+                        ])
+                self._audit_header_written = True
+
+            with open(self.audit_csv_path, "a", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    ev.get("ts", time.time()),
+                    ev.get("proc_key", ""),
+                    image,
+                    ev_type,
+                    path_or_dest,
+                    reason,
+                    matched_pattern,
+                ])
+        except Exception as e:
+            logger.debug("Failed to write to audit log %s: %s", self.audit_csv_path, e)
 
     def process_event(
         self, ev: Dict[str, Any], pr: Optional[Dict[str, Any]], zn: Optional[Dict[str, Any]]
@@ -691,15 +754,18 @@ class LiveSysmonCollector:
         if self.backfill and ev.get("ts", 0.0) < self.start_ts:
             self.historical_count += 1
 
-        reason = self.check_filter_reason(ev)
+        reason, matched_pattern = self.check_filter_reason(ev)
         if reason == "sysmon":
             self.filtered_sysmon += 1
+            self.log_filtered_event(ev, pr, reason, matched_pattern or "sysmon")
             return False
         elif reason == "collector":
             self.filtered_collector += 1
+            self.log_filtered_event(ev, pr, reason, matched_pattern or "collector")
             return False
         elif reason == "noise_pattern":
             self.filtered_noise_pattern += 1
+            self.log_filtered_event(ev, pr, reason, matched_pattern or "noise_pattern")
             return False
 
         try:
@@ -799,6 +865,8 @@ class LiveSysmonCollector:
         print(f"    - Filtered (Sysmon binary):     {self.filtered_sysmon}")
         print(f"    - Filtered (Collector process): {self.filtered_collector}")
         print(f"    - Filtered (Noise patterns):    {self.filtered_noise_pattern}")
+        if self.audit_csv_path:
+            print(f"  Filtered audit log:    {self.audit_csv_path}")
         print(f"  Dropped events:        {self.dropped_events}")
         print(f"  Dropped ratio:         {dropped_ratio:.2f}% (SPEC requirement: < 1.0%)")
         print("=" * 55 + "\n")

@@ -229,6 +229,9 @@ def test_filter_breakdown_metrics(tmp_path):
         image_path="C:\\Users\\User\\Downloads\\sample.pdf",
     )
 
+    audit_csv = str(tmp_path / "test_audit.csv")
+    collector.audit_csv_path = audit_csv
+
     collector.process_event(sysmon_ev, None, None)
     collector.process_event(collector_ev, None, None)
     collector.process_event(recent_ev, None, None)
@@ -242,4 +245,15 @@ def test_filter_breakdown_metrics(tmp_path):
     item = collector.event_queue.get_nowait()
     assert item[0]["path"] == "C:\\Users\\User\\Downloads\\sample.pdf"
     collector.store.close()
+
+    # Verify audit CSV was created and contains exactly 3 filtered events
+    assert os.path.exists(audit_csv)
+    with open(audit_csv, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    assert len(lines) == 4  # Header + 3 filtered rows
+    assert "filter_reason,matched_pattern" in lines[0]
+    assert "sysmon" in lines[1]
+    assert "collector" in lines[2]
+    assert "noise_pattern" in lines[3]
+
 
