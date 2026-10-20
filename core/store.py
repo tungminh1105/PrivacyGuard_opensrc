@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import sqlite3
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ class EventStore:
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._init_db(wal_mode=wal_mode)
+        self.existing_record_ids: Set[int] = self._load_existing_record_ids()
 
     def _ensure_dir(self) -> None:
         """Create parent directory for the database file if not present."""
@@ -102,8 +103,19 @@ class EventStore:
         cur.executescript(SCHEMA_SQL)
         self.conn.commit()
 
+    def _load_existing_record_ids(self) -> Set[int]:
+        """Load set of existing event_record_ids from extra_json column."""
+        cur = self.conn.cursor()
+        try:
+            cur.execute("SELECT json_extract(extra_json, '$.event_record_id') FROM events WHERE extra_json IS NOT NULL")
+            return {int(row[0]) for row in cur.fetchall() if row[0] is not None}
+        except Exception:
+            return set()
+
     def insert_events_batch(self, events: List[Dict[str, Any]]) -> int:
         """Insert a batch of event dictionaries into the events table.
+
+        Automatically deduplicates events that share an already recorded event_record_id.
 
         Args:
             events: List of event dicts containing fields matching the schema.
@@ -114,12 +126,39 @@ class EventStore:
         if not events:
             return 0
 
+        # Filter out events whose event_record_id has already been recorded
+        to_insert = []
+        for e in events:
+            rec_id = None
+            extra = e.get("extra_json")
+            if isinstance(extra, dict):
+                rec_id = extra.get("event_record_id")
+            elif isinstance(extra, str):
+                try:
+                    rec_id = json.loads(extra).get("event_record_id")
+                except Exception:
+                    pass
+
+            if rec_id is not None:
+                try:
+                    rec_id = int(rec_id)
+                    if rec_id in self.existing_record_ids:
+                        continue
+                    self.existing_record_ids.add(rec_id)
+                except (ValueError, TypeError):
+                    pass
+
+            to_insert.append(e)
+
+        if not to_insert:
+            return 0
+
         sql = """
         INSERT INTO events (ts, pid, ppid, proc_key, type, path, dest_ip, dest_port, proto, nbytes, extra_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         rows = []
-        for e in events:
+        for e in to_insert:
             extra = e.get("extra_json")
             if isinstance(extra, dict):
                 extra = json.dumps(extra, ensure_ascii=False)

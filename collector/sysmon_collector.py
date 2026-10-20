@@ -2,16 +2,20 @@
 
 Collects and parses Windows Sysmon operational logs (Event ID 1, 3, 5, 11).
 Normalizes events into the schema specified in SPEC Section 4.
-Supports live collection via pywin32 Event Log API and offline replay from text dumps.
+Supports live collection via win32evtlog EvtSubscribe (future events only by default)
+and offline replay from text dumps or backfill.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import queue
 import re
 import sys
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -277,7 +281,10 @@ class SysmonParser:
         return False
 
     def normalize_event(
-        self, event_id: int, fields: Dict[str, str]
+        self,
+        event_id: int,
+        fields: Dict[str, str],
+        event_record_id: Optional[int] = None,
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Normalize parsed raw fields into schema objects.
 
@@ -302,6 +309,13 @@ class SysmonParser:
         if not proc_guid:
             return None, None, None
 
+        # Check deduplication by event_record_id if available
+        if event_record_id is not None:
+            dedup_rec_key = ("record_id", event_record_id)
+            if dedup_rec_key in self.seen_dedup_keys:
+                return None, None, None
+            self.seen_dedup_keys.add(dedup_rec_key)
+
         try:
             pid = int(fields.get(proc_id_field, 0))
         except (ValueError, TypeError):
@@ -312,7 +326,10 @@ class SysmonParser:
         dest_ip = None
         dest_port = None
         proto = None
-        extra_json: Optional[Dict[str, Any]] = None
+        extra_json: Dict[str, Any] = {}
+
+        if event_record_id is not None:
+            extra_json["event_record_id"] = event_record_id
 
         proc_record: Optional[Dict[str, Any]] = None
         zone_record: Optional[Dict[str, Any]] = None
@@ -360,7 +377,7 @@ class SysmonParser:
             if not raw_target_fn:
                 return None, None, None
 
-            # Deduplication rule: (ProcessGuid, TargetFilename, UtcTime)
+            # Deduplication rule for file create: (ProcessGuid, TargetFilename, UtcTime)
             dedup_key = (proc_guid, raw_target_fn, utc_str)
             if dedup_key in self.seen_dedup_keys:
                 return None, None, None
@@ -371,7 +388,7 @@ class SysmonParser:
                 base_path = re.sub(r":Zone\.Identifier.*$", "", raw_target_fn, flags=re.IGNORECASE)
                 path = base_path
                 zone_data = read_zone_identifier(base_path)
-                extra_json = {"zone": zone_data}
+                extra_json["zone"] = zone_data
                 zone_record = {
                     "path": base_path,
                     "host_domain": zone_data["host_domain"],
@@ -394,7 +411,7 @@ class SysmonParser:
             "dest_port": dest_port,
             "proto": proto,
             "nbytes": 0,
-            "extra_json": extra_json,
+            "extra_json": extra_json if extra_json else None,
         }
 
         return event_record, proc_record, zone_record
@@ -419,6 +436,14 @@ class SysmonParser:
         if eid is None or eid not in self.id_to_event_cfg:
             return None, None, None
 
+        event_record_id: Optional[int] = None
+        rec_m = re.search(r"Event\[(\d+)\]", block)
+        if rec_m:
+            try:
+                event_record_id = int(rec_m.group(1))
+            except ValueError:
+                event_record_id = None
+
         fields: Dict[str, str] = {}
         curr_key: Optional[str] = None
 
@@ -437,7 +462,7 @@ class SysmonParser:
                 # Wrapped continuation of previous field value without adding space
                 fields[curr_key] += line
 
-        return self.normalize_event(eid, fields)
+        return self.normalize_event(eid, fields, event_record_id=event_record_id)
 
     def parse_xml_event(
         self, xml_content: str
@@ -449,7 +474,6 @@ class SysmonParser:
             logger.debug("Failed to parse event XML: %s", e)
             return None, None, None
 
-        # Handle namespaces by matching tag endings
         def find_child(parent, tag_name):
             for child in parent:
                 if child.tag.endswith(tag_name):
@@ -472,6 +496,14 @@ class SysmonParser:
         if eid not in self.id_to_event_cfg:
             return None, None, None
 
+        event_record_id: Optional[int] = None
+        rec_id_elem = find_child(system_elem, "EventRecordID")
+        if rec_id_elem is not None and rec_id_elem.text:
+            try:
+                event_record_id = int(rec_id_elem.text.strip())
+            except ValueError:
+                event_record_id = None
+
         event_data_elem = find_child(root, "EventData")
         fields: Dict[str, str] = {}
         if event_data_elem is not None:
@@ -480,7 +512,6 @@ class SysmonParser:
                 if name:
                     fields[name] = d.text or ""
 
-        # Fallback for UtcTime if not in EventData
         if "UtcTime" not in fields:
             time_created = find_child(system_elem, "TimeCreated")
             if time_created is not None:
@@ -488,7 +519,7 @@ class SysmonParser:
                 if sys_time:
                     fields["UtcTime"] = sys_time
 
-        return self.normalize_event(eid, fields)
+        return self.normalize_event(eid, fields, event_record_id=event_record_id)
 
     def parse_text_dump_file(
         self, path: str, filter_noise: bool = True
@@ -516,7 +547,13 @@ class SysmonParser:
 class LiveSysmonCollector:
     """Collects Sysmon events in real-time from Windows Event Log."""
 
-    def __init__(self, db_path: str = "data/privacyguard.db", config_path: str = "config.yaml"):
+    def __init__(
+        self,
+        db_path: str = "data/privacyguard.db",
+        config_path: str = "config.yaml",
+        backfill: bool = False,
+        max_queue_size: int = 100000,
+    ):
         self.config = load_config(config_path)
         self.store = EventStore(
             db_path=db_path,
@@ -526,93 +563,163 @@ class LiveSysmonCollector:
         self.channel = self.config.get("sysmon", {}).get("channel", "Microsoft-Windows-Sysmon/Operational")
         self.batch_size = self.config.get("database", {}).get("batch_size", 500)
         self.flush_interval = self.config.get("database", {}).get("flush_interval_sec", 1.0)
+        self.backfill = backfill
+        self.max_queue_size = max_queue_size
+
+        self.event_queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
         self.running = False
-        self.total_collected = 0
-        self.total_dropped = 0
+        self.total_received = 0
+        self.total_written = 0
+        self.dropped_events = 0
+        self.historical_count = 0
+        self.start_ts = 0.0
+
+    def _writer_worker(self) -> None:
+        """Background thread worker to flush queued events to SQLite store in batches."""
+        event_batch: List[Dict[str, Any]] = []
+        last_flush = time.time()
+
+        while self.running or not self.event_queue.empty():
+            try:
+                item = self.event_queue.get(timeout=0.2)
+                ev, pr, zn = item
+                event_batch.append(ev)
+                if pr is not None:
+                    if "start_ts" in pr:
+                        self.store.upsert_process(pr)
+                    elif "end_ts" in pr:
+                        self.store.update_process_end(pr["proc_key"], pr["end_ts"])
+                if zn is not None:
+                    self.store.upsert_file_zone(zn)
+                self.event_queue.task_done()
+            except queue.Empty:
+                pass
+
+            now = time.time()
+            if len(event_batch) >= self.batch_size or (now - last_flush >= self.flush_interval and event_batch):
+                inserted = self.store.insert_events_batch(event_batch)
+                self.total_written += inserted
+                event_batch.clear()
+                last_flush = now
+
+        # Flush any remaining items
+        if event_batch:
+            inserted = self.store.insert_events_batch(event_batch)
+            self.total_written += inserted
+            event_batch.clear()
+
+    def process_event(
+        self, ev: Dict[str, Any], pr: Optional[Dict[str, Any]], zn: Optional[Dict[str, Any]]
+    ) -> bool:
+        """Process a single normalized event through filter, queue, and metrics."""
+        self.total_received += 1
+
+        # Check timestamp against start_ts in live mode
+        if not self.backfill and ev.get("ts", 0.0) < (self.start_ts - 2.0):
+            # Ignore events occurring before collector start
+            return False
+
+        if self.backfill and ev.get("ts", 0.0) < self.start_ts:
+            self.historical_count += 1
+
+        if self.parser.is_noise(ev):
+            return False
+
+        try:
+            self.event_queue.put_nowait((ev, pr, zn))
+            return True
+        except queue.Full:
+            self.dropped_events += 1
+            logger.warning("Event queue full! Dropping event (total dropped: %d)", self.dropped_events)
+            return False
+
+    def print_metrics(self) -> None:
+        """Print summary session metrics including dropped ratio."""
+        dropped_ratio = (
+            (self.dropped_events / self.total_received * 100.0) if self.total_received > 0 else 0.0
+        )
+        print("\n" + "=" * 55)
+        print("COLLECTOR SESSION METRICS:")
+        print(f"  Mode:                  {'Backfill (Historical)' if self.backfill else 'Live (Future Events Only)'}")
+        if self.backfill:
+            print(f"  Historical events:     {self.historical_count}")
+        print(f"  Total events received: {self.total_received}")
+        print(f"  Total events written:  {self.total_written}")
+        print(f"  Dropped events:        {self.dropped_events}")
+        print(f"  Dropped ratio:         {dropped_ratio:.2f}% (SPEC requirement: < 1.0%)")
+        print("=" * 55 + "\n")
 
     def run_live(self, duration_sec: Optional[float] = None) -> None:
         """Run live collection for specified duration or until interrupted."""
         try:
+            import win32event
             import win32evtlog
         except ImportError:
-            logger.error("pywin32 (win32evtlog) is required for live collection.")
+            logger.error("pywin32 (win32evtlog, win32event) is required for live collection.")
             return
 
-        logger.info("Opening Sysmon channel: %s", self.channel)
+        self.start_ts = time.time()
+        self.running = True
+
+        # Start writer worker thread
+        writer_thread = threading.Thread(target=self._writer_worker, daemon=True)
+        writer_thread.start()
+
+        # Create Win32 event for subscription notification
+        h_event = win32event.CreateEvent(None, 0, 0, None)
+
+        if self.backfill:
+            logger.info("Backfill enabled: Ingesting historical events from channel %s...", self.channel)
+            sub_flags = win32evtlog.EvtSubscribeStartAtOldestRecord
+        else:
+            logger.info("Live mode: Subscribing to future events only on channel %s...", self.channel)
+            sub_flags = win32evtlog.EvtSubscribeToFutureEvents
+
         try:
-            query_handle = win32evtlog.EvtQuery(
+            sub_handle = win32evtlog.EvtSubscribe(
                 self.channel,
-                win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryForwardDirection,
+                sub_flags,
+                SignalEvent=h_event,
             )
         except Exception as e:
-            logger.error("Failed to query Sysmon channel (%s). Ensure this process runs as Administrator.", e)
+            logger.error("Failed to subscribe to Sysmon channel (%s). Ensure this process runs as Administrator.", e)
+            self.running = False
+            writer_thread.join(timeout=1.0)
+            self.store.close()
             return
 
-        self.running = True
-        start_time = time.time()
-        event_batch: List[Dict[str, Any]] = []
-        last_flush = time.time()
-
-        logger.info("Sysmon live collector started. Press Ctrl+C to stop.")
+        logger.info("Sysmon live collector active. Duration: %s seconds. Press Ctrl+C to stop.", duration_sec or "Unlimited")
         try:
             while self.running:
-                if duration_sec and (time.time() - start_time) >= duration_sec:
+                if duration_sec and (time.time() - self.start_ts) >= duration_sec:
                     logger.info("Collection duration (%s seconds) reached.", duration_sec)
                     break
 
-                try:
-                    events = win32evtlog.EvtNext(query_handle, 50, 1000)
-                except Exception as e:
-                    time.sleep(0.5)
-                    continue
-
-                if not events:
-                    if event_batch and (time.time() - last_flush) >= self.flush_interval:
-                        self.store.insert_events_batch(event_batch)
-                        event_batch.clear()
-                        last_flush = time.time()
-                    time.sleep(0.2)
-                    continue
-
-                for h_event in events:
+                # Wait for event signal with 500ms timeout
+                rc = win32event.WaitForSingleObject(h_event, 500)
+                if rc == win32event.WAIT_OBJECT_0:
                     try:
-                        xml_data = win32evtlog.EvtRender(h_event, win32evtlog.EvtRenderEventXml)
-                        ev, pr, zn = self.parser.parse_xml_event(xml_data)
-                        if ev is not None:
-                            if self.parser.is_noise(ev):
-                                continue
-                            event_batch.append(ev)
-                            self.total_collected += 1
-                            if pr is not None:
-                                if "start_ts" in pr:
-                                    self.store.upsert_process(pr)
-                                elif "end_ts" in pr:
-                                    self.store.update_process_end(pr["proc_key"], pr["end_ts"])
-                            if zn is not None:
-                                self.store.upsert_file_zone(zn)
-                    except Exception as err:
-                        self.total_dropped += 1
-                        logger.debug("Error processing event: %s", err)
+                        events = win32evtlog.EvtNext(sub_handle, 50, 0)
+                    except Exception:
+                        events = []
 
-                if len(event_batch) >= self.batch_size or (time.time() - last_flush) >= self.flush_interval:
-                    if event_batch:
-                        self.store.insert_events_batch(event_batch)
-                        event_batch.clear()
-                        last_flush = time.time()
+                    for h_ev in events:
+                        try:
+                            xml_data = win32evtlog.EvtRender(h_ev, win32evtlog.EvtRenderEventXml)
+                            ev, pr, zn = self.parser.parse_xml_event(xml_data)
+                            if ev is not None:
+                                self.process_event(ev, pr, zn)
+                        except Exception as err:
+                            self.dropped_events += 1
+                            logger.debug("Error processing event XML: %s", err)
 
         except KeyboardInterrupt:
             logger.info("Stop requested by user.")
         finally:
-            if event_batch:
-                self.store.insert_events_batch(event_batch)
-                event_batch.clear()
             self.running = False
+            writer_thread.join(timeout=5.0)
             self.store.close()
-            logger.info(
-                "Collector finished. Total collected: %d, dropped: %d",
-                self.total_collected,
-                self.total_dropped,
-            )
+            self.print_metrics()
 
 
 def main():
@@ -620,6 +727,7 @@ def main():
     parser.add_argument("--file", type=str, help="Path to text dump file to parse and import")
     parser.add_argument("--db", type=str, default="data/privacyguard.db", help="Path to SQLite database")
     parser.add_argument("--duration", type=float, default=60.0, help="Live collection duration in seconds")
+    parser.add_argument("--backfill", action="store_true", default=False, help="Backfill historical events from channel instead of only future events")
     parser.add_argument("--no-filter", action="store_true", help="Disable noise filtering")
     args = parser.parse_args()
 
@@ -643,7 +751,10 @@ def main():
         print(f"Inserted {inserted} events into {args.db}")
         store.close()
     else:
-        collector = LiveSysmonCollector(db_path=args.db)
+        collector = LiveSysmonCollector(
+            db_path=args.db,
+            backfill=args.backfill,
+        )
         collector.run_live(duration_sec=args.duration)
 
 
