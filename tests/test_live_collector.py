@@ -1,6 +1,7 @@
 """Unit tests for live collection watermark polling, backfill filtering, and event deduplication."""
 
 import os
+import time
 import pytest
 from collector.sysmon_collector import LiveSysmonCollector, SysmonParser
 from core.store import EventStore
@@ -201,3 +202,44 @@ def test_queue_overflow_tracks_dropped_events(tmp_path):
     dropped_ratio = (collector.dropped_events / collector.total_received) * 100.0
     assert round(dropped_ratio, 2) == 66.67
     collector.store.close()
+
+
+def test_filter_breakdown_metrics(tmp_path):
+    """Verify that filtered events are tracked by reason: sysmon, collector, noise pattern."""
+    db_file = str(tmp_path / "test_breakdown.db")
+    collector = LiveSysmonCollector(db_path=db_file)
+
+    # 1. Event from sysmon binary
+    sysmon_ev = generate_mock_event(record_id=1, ts=time.time(), image_path="C:\\Windows\\Sysmon64.exe")
+    # 2. Event from collector's own PID
+    collector_ev = generate_mock_event(record_id=2, ts=time.time())
+    collector_ev["pid"] = os.getpid()
+    # 3. Event from Recent shortcut noise pattern
+    recent_ev = generate_mock_event(
+        record_id=3,
+        ts=time.time(),
+        is_file=True,
+        image_path="C:\\Users\\User\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\document.lnk",
+    )
+    # 4. Valid normal event
+    normal_ev = generate_mock_event(
+        record_id=4,
+        ts=time.time(),
+        is_file=True,
+        image_path="C:\\Users\\User\\Downloads\\sample.pdf",
+    )
+
+    collector.process_event(sysmon_ev, None, None)
+    collector.process_event(collector_ev, None, None)
+    collector.process_event(recent_ev, None, None)
+    collector.process_event(normal_ev, None, None)
+
+    assert collector.total_received == 4
+    assert collector.filtered_sysmon == 1
+    assert collector.filtered_collector == 1
+    assert collector.filtered_noise_pattern == 1
+    assert not collector.event_queue.empty()
+    item = collector.event_queue.get_nowait()
+    assert item[0]["path"] == "C:\\Users\\User\\Downloads\\sample.pdf"
+    collector.store.close()
+

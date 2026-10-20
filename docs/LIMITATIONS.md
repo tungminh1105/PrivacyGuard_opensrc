@@ -1,6 +1,6 @@
 # PrivacyGuard: System Limitations and Constraints
 
-This document outlines key limitations of the current telemetry and detection architecture, specifically arising from the transition to Microsoft Sysmon.
+This document outlines key limitations of the current telemetry and detection architecture, specifically arising from the transition to Microsoft Sysmon and single-session data constraints.
 
 ---
 
@@ -36,3 +36,12 @@ This document outlines key limitations of the current telemetry and detection ar
 ## 4. Network Byte Count Granularity
 - **Limitation**: Sysmon Event ID 3 (`NetworkConnect`) records connection initiation, remote IP, destination port, and transport protocol, but does NOT track per-connection packet/byte volume (`nbytes = 0`).
 - **Impact**: Byte-level transmission metrics rely on socket-level instrumentation or simulator ground-truth correlation.
+
+---
+
+## 5. Single Measurement Session Insufficient for Model Training
+- **Limitation**: A single 60-second live collection session represents only a single point-in-time sample, serving as a functional smoke test to verify collector correctness.
+- **Impact on Machine Learning & Deep Learning**:
+  - Machine learning models (rules baseline, Isolation Forest, Autoencoder, LSTM) cannot be reliably trained on a single brief measurement session.
+  - As mandated by SPEC Section 8, training requires comprehensive benign baseline data collected over multiple days across diverse normal workloads (web browsing, office productivity, cloud synchronization, OS updates).
+  - Training on a single brief capture would cause severe overfitting, high false positive rates, and poor generalization.

@@ -69,6 +69,7 @@ noise_filters:
     - "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Code Cache"
     - "\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache"
     - "\\AppData\\Local\\Packages\\"
+    - "\\Microsoft\\Windows\\Recent\\"
   ignore_processes:
     - "privacyguard"
     - "python.exe"

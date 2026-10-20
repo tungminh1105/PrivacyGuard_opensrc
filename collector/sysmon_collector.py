@@ -120,6 +120,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Code Cache",
             "\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache",
             "\\AppData\\Local\\Packages\\",
+            "\\Microsoft\\Windows\\Recent\\",
         ],
         "ignore_processes": ["privacyguard", "python.exe"],
     },
@@ -618,6 +619,9 @@ class LiveSysmonCollector:
         self.dropped_events = 0
         self.historical_count = 0
         self.start_ts = 0.0
+        self.filtered_sysmon = 0
+        self.filtered_collector = 0
+        self.filtered_noise_pattern = 0
 
     def _writer_worker(self) -> None:
         """Background thread worker to flush queued events to SQLite store in batches."""
@@ -653,6 +657,31 @@ class LiveSysmonCollector:
             self.total_written += inserted
             event_batch.clear()
 
+    def check_filter_reason(self, ev: Dict[str, Any]) -> Optional[str]:
+        """Check if an event matches a filtering condition and return the specific reason."""
+        path = ev.get("path") or ""
+        lower_path = path.lower() if path else ""
+
+        # 1. Filter sysmon binary itself
+        if "sysmon" in lower_path:
+            return "sysmon"
+
+        # 2. Filter collector's own process
+        collector_pid = os.getpid()
+        if ev.get("pid") == collector_pid:
+            return "collector"
+        if self.parser.collector_guid and ev.get("proc_key") == self.parser.collector_guid:
+            return "collector"
+
+        # 3. Filter noise patterns
+        filters = self.config.get("noise_filters", {})
+        if filters.get("enabled", True) and lower_path:
+            for pattern in filters.get("path_patterns", []):
+                if pattern.lower() in lower_path:
+                    return "noise_pattern"
+
+        return None
+
     def process_event(
         self, ev: Dict[str, Any], pr: Optional[Dict[str, Any]], zn: Optional[Dict[str, Any]]
     ) -> bool:
@@ -662,7 +691,15 @@ class LiveSysmonCollector:
         if self.backfill and ev.get("ts", 0.0) < self.start_ts:
             self.historical_count += 1
 
-        if self.parser.is_noise(ev):
+        reason = self.check_filter_reason(ev)
+        if reason == "sysmon":
+            self.filtered_sysmon += 1
+            return False
+        elif reason == "collector":
+            self.filtered_collector += 1
+            return False
+        elif reason == "noise_pattern":
+            self.filtered_noise_pattern += 1
             return False
 
         try:
@@ -745,7 +782,8 @@ class LiveSysmonCollector:
         return new_count
 
     def print_metrics(self) -> None:
-        """Print summary session metrics including dropped ratio."""
+        """Print summary session metrics including dropped ratio and filter breakdown."""
+        total_filtered = self.filtered_sysmon + self.filtered_collector + self.filtered_noise_pattern
         dropped_ratio = (
             (self.dropped_events / self.total_received * 100.0) if self.total_received > 0 else 0.0
         )
@@ -757,6 +795,10 @@ class LiveSysmonCollector:
             print(f"  Historical events:     {self.historical_count}")
         print(f"  Total events received: {self.total_received}")
         print(f"  Total events written:  {self.total_written}")
+        print(f"  Total events filtered: {total_filtered}")
+        print(f"    - Filtered (Sysmon binary):     {self.filtered_sysmon}")
+        print(f"    - Filtered (Collector process): {self.filtered_collector}")
+        print(f"    - Filtered (Noise patterns):    {self.filtered_noise_pattern}")
         print(f"  Dropped events:        {self.dropped_events}")
         print(f"  Dropped ratio:         {dropped_ratio:.2f}% (SPEC requirement: < 1.0%)")
         print("=" * 55 + "\n")
