@@ -1,0 +1,235 @@
+"""SQLite storage module for PrivacyGuard events, processes, and alerts.
+
+Implements the data schema specified in SPEC Section 4 with WAL mode and batching.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts REAL NOT NULL,
+  pid INTEGER NOT NULL,
+  ppid INTEGER,
+  proc_key TEXT NOT NULL,
+  type TEXT NOT NULL,
+  path TEXT,
+  dest_ip TEXT,
+  dest_port INTEGER,
+  proto TEXT,
+  nbytes INTEGER DEFAULT 0,
+  extra_json TEXT DEFAULT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_pk ON events(proc_key, ts);
+
+CREATE TABLE IF NOT EXISTS processes (
+  proc_key TEXT PRIMARY KEY,
+  pid INTEGER,
+  ppid INTEGER,
+  name TEXT,
+  exe_path TEXT,
+  signed INTEGER,
+  publisher TEXT,
+  start_ts REAL,
+  end_ts REAL
+);
+
+CREATE TABLE IF NOT EXISTS windows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  proc_key TEXT,
+  t_start REAL,
+  t_end REAL,
+  features_json TEXT,
+  label INTEGER,
+  scenario TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts REAL,
+  proc_key TEXT,
+  window_id INTEGER,
+  detector TEXT,
+  score REAL,
+  severity TEXT,
+  evidence TEXT,
+  status TEXT DEFAULT 'new'
+);
+
+CREATE TABLE IF NOT EXISTS file_zones (
+  path TEXT PRIMARY KEY,
+  host_domain TEXT,
+  referrer_domain TEXT,
+  zone_id TEXT,
+  proc_key TEXT,
+  ts REAL
+);
+"""
+
+
+class EventStore:
+    """Manages SQLite storage for PrivacyGuard with WAL mode and bulk write capability."""
+
+    def __init__(self, db_path: str = "data/privacyguard.db", wal_mode: bool = True):
+        self.db_path = db_path
+        self._ensure_dir()
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self._init_db(wal_mode=wal_mode)
+
+    def _ensure_dir(self) -> None:
+        """Create parent directory for the database file if not present."""
+        dirname = os.path.dirname(self.db_path)
+        if dirname and not os.path.exists(dirname):
+            os.makedirs(dirname, exist_ok=True)
+
+    def _init_db(self, wal_mode: bool = True) -> None:
+        """Initialize database tables, indexes, and journal mode."""
+        cur = self.conn.cursor()
+        if wal_mode:
+            cur.execute("PRAGMA journal_mode=WAL;")
+            cur.execute("PRAGMA synchronous=NORMAL;")
+        cur.executescript(SCHEMA_SQL)
+        self.conn.commit()
+
+    def insert_events_batch(self, events: List[Dict[str, Any]]) -> int:
+        """Insert a batch of event dictionaries into the events table.
+
+        Args:
+            events: List of event dicts containing fields matching the schema.
+
+        Returns:
+            Number of inserted rows.
+        """
+        if not events:
+            return 0
+
+        sql = """
+        INSERT INTO events (ts, pid, ppid, proc_key, type, path, dest_ip, dest_port, proto, nbytes, extra_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        rows = []
+        for e in events:
+            extra = e.get("extra_json")
+            if isinstance(extra, dict):
+                extra = json.dumps(extra, ensure_ascii=False)
+            rows.append((
+                float(e["ts"]),
+                int(e["pid"]),
+                int(e["ppid"]) if e.get("ppid") is not None else None,
+                str(e["proc_key"]),
+                str(e["type"]),
+                e.get("path"),
+                e.get("dest_ip"),
+                int(e["dest_port"]) if e.get("dest_port") is not None else None,
+                e.get("proto"),
+                int(e.get("nbytes", 0)),
+                extra,
+            ))
+
+        with self.conn:
+            self.conn.executemany(sql, rows)
+        return len(rows)
+
+    def upsert_process(self, proc: Dict[str, Any]) -> None:
+        """Insert or update process metadata in the processes table."""
+        sql = """
+        INSERT INTO processes (proc_key, pid, ppid, name, exe_path, signed, publisher, start_ts, end_ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(proc_key) DO UPDATE SET
+            pid=COALESCE(excluded.pid, processes.pid),
+            ppid=COALESCE(excluded.ppid, processes.ppid),
+            name=COALESCE(excluded.name, processes.name),
+            exe_path=COALESCE(excluded.exe_path, processes.exe_path),
+            signed=COALESCE(excluded.signed, processes.signed),
+            publisher=COALESCE(excluded.publisher, processes.publisher),
+            start_ts=COALESCE(excluded.start_ts, processes.start_ts),
+            end_ts=COALESCE(excluded.end_ts, processes.end_ts)
+        """
+        with self.conn:
+            self.conn.execute(sql, (
+                str(proc["proc_key"]),
+                int(proc["pid"]) if proc.get("pid") is not None else None,
+                int(proc["ppid"]) if proc.get("ppid") is not None else None,
+                proc.get("name"),
+                proc.get("exe_path"),
+                int(proc["signed"]) if proc.get("signed") is not None else None,
+                proc.get("publisher"),
+                float(proc["start_ts"]) if proc.get("start_ts") is not None else None,
+                float(proc["end_ts"]) if proc.get("end_ts") is not None else None,
+            ))
+
+    def update_process_end(self, proc_key: str, end_ts: float) -> None:
+        """Update end timestamp for a terminated process."""
+        sql = "UPDATE processes SET end_ts = ? WHERE proc_key = ?"
+        with self.conn:
+            self.conn.execute(sql, (float(end_ts), str(proc_key)))
+
+    def upsert_file_zone(self, zone: Dict[str, Any]) -> None:
+        """Insert or replace Zone.Identifier information for a downloaded file."""
+        sql = """
+        INSERT INTO file_zones (path, host_domain, referrer_domain, zone_id, proc_key, ts)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+            host_domain=excluded.host_domain,
+            referrer_domain=excluded.referrer_domain,
+            zone_id=excluded.zone_id,
+            proc_key=excluded.proc_key,
+            ts=excluded.ts
+        """
+        with self.conn:
+            self.conn.execute(sql, (
+                str(zone["path"]),
+                zone.get("host_domain", "unknown"),
+                zone.get("referrer_domain", "unknown"),
+                str(zone.get("zone_id", "unknown")),
+                zone.get("proc_key"),
+                float(zone["ts"]) if zone.get("ts") is not None else None,
+            ))
+
+    def get_event_count(self) -> int:
+        """Return total row count in events table."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM events")
+        return cur.fetchone()[0]
+
+    def get_events(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Retrieve events ordered by id ascending."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM events ORDER BY id ASC LIMIT ? OFFSET ?", (limit, offset))
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_processes(self) -> List[Dict[str, Any]]:
+        """Retrieve all recorded processes."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM processes")
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_file_zones(self) -> List[Dict[str, Any]]:
+        """Retrieve all recorded file zone info."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM file_zones")
+        return [dict(row) for row in cur.fetchall()]
+
+    def close(self) -> None:
+        """Close database connection."""
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> EventStore:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()

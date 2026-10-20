@@ -1,0 +1,74 @@
+# PrivacyGuard Configuration
+
+database:
+  db_path: "data/privacyguard.db"
+  wal_mode: true
+  batch_size: 500
+  flush_interval_sec: 1.0
+
+sysmon:
+  channel: "Microsoft-Windows-Sysmon/Operational"
+  events:
+    process_create:
+      event_id: 1
+      type: "proc_start"
+      fields:
+        utc_time: "UtcTime"
+        process_guid: "ProcessGuid"
+        process_id: "ProcessId"
+        image: "Image"
+        parent_process_guid: "ParentProcessGuid"
+        parent_process_id: "ParentProcessId"
+        command_line: "CommandLine"
+        user: "User"
+    network_connect:
+      event_id: 3
+      type: "net_connect"
+      fields:
+        utc_time: "UtcTime"
+        process_guid: "ProcessGuid"
+        process_id: "ProcessId"
+        image: "Image"
+        protocol: "Protocol"
+        dest_ip: "DestinationIp"
+        dest_port: "DestinationPort"
+    process_terminate:
+      event_id: 5
+      type: "proc_end"
+      fields:
+        utc_time: "UtcTime"
+        process_guid: "ProcessGuid"
+        process_id: "ProcessId"
+        image: "Image"
+        user: "User"
+    file_create:
+      event_id: 11
+      type: "file_create"
+      fields:
+        utc_time: "UtcTime"
+        process_guid: "ProcessGuid"
+        process_id: "ProcessId"
+        image: "Image"
+        target_filename: "TargetFilename"
+        creation_utc_time: "CreationUtcTime"
+        user: "User"
+
+noise_filters:
+  enabled: true
+  path_patterns:
+    - "C:\\Windows\\Prefetch"
+    - "C:\\Windows\\System32\\LogFiles"
+    - "C:\\Windows\\Temp"
+    - "C:\\Windows\\WinSxS"
+    - "$Mft"
+    - "pagefile.sys"
+    - "swapfile.sys"
+    - "\\AppData\\Local\\Temp"
+    - "\\AppData\\Local\\Microsoft\\Windows\\INetCache"
+    - "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache"
+    - "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Code Cache"
+    - "\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache"
+    - "\\AppData\\Local\\Packages\\"
+  ignore_processes:
+    - "privacyguard"
+    - "python.exe"

@@ -1,0 +1,5 @@
+psutil>=7.0.0
+pywin32>=308
+pywintrace>=0.2.0
+pytest>=8.0.0
+pyyaml>=6.0.0

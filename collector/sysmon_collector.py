@@ -1,0 +1,651 @@
+"""Sysmon collector and parser module for PrivacyGuard.
+
+Collects and parses Windows Sysmon operational logs (Event ID 1, 3, 5, 11).
+Normalizes events into the schema specified in SPEC Section 4.
+Supports live collection via pywin32 Event Log API and offline replay from text dumps.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import re
+import sys
+import time
+import urllib.parse
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
+import xml.etree.ElementTree as ET
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from core.store import EventStore
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "database": {
+        "db_path": "data/privacyguard.db",
+        "wal_mode": True,
+        "batch_size": 500,
+        "flush_interval_sec": 1.0,
+    },
+    "sysmon": {
+        "channel": "Microsoft-Windows-Sysmon/Operational",
+        "events": {
+            "process_create": {
+                "event_id": 1,
+                "type": "proc_start",
+                "fields": {
+                    "utc_time": "UtcTime",
+                    "process_guid": "ProcessGuid",
+                    "process_id": "ProcessId",
+                    "image": "Image",
+                    "parent_process_guid": "ParentProcessGuid",
+                    "parent_process_id": "ParentProcessId",
+                    "command_line": "CommandLine",
+                    "user": "User",
+                },
+            },
+            "network_connect": {
+                "event_id": 3,
+                "type": "net_connect",
+                "fields": {
+                    "utc_time": "UtcTime",
+                    "process_guid": "ProcessGuid",
+                    "process_id": "ProcessId",
+                    "image": "Image",
+                    "protocol": "Protocol",
+                    "dest_ip": "DestinationIp",
+                    "dest_port": "DestinationPort",
+                },
+            },
+            "process_terminate": {
+                "event_id": 5,
+                "type": "proc_end",
+                "fields": {
+                    "utc_time": "UtcTime",
+                    "process_guid": "ProcessGuid",
+                    "process_id": "ProcessId",
+                    "image": "Image",
+                    "user": "User",
+                },
+            },
+            "file_create": {
+                "event_id": 11,
+                "type": "file_create",
+                "fields": {
+                    "utc_time": "UtcTime",
+                    "process_guid": "ProcessGuid",
+                    "process_id": "ProcessId",
+                    "image": "Image",
+                    "target_filename": "TargetFilename",
+                    "creation_utc_time": "CreationUtcTime",
+                    "user": "User",
+                },
+            },
+        },
+    },
+    "noise_filters": {
+        "enabled": True,
+        "path_patterns": [
+            "C:\\Windows\\Prefetch",
+            "C:\\Windows\\System32\\LogFiles",
+            "C:\\Windows\\Temp",
+            "C:\\Windows\\WinSxS",
+            "$Mft",
+            "pagefile.sys",
+            "swapfile.sys",
+            "\\AppData\\Local\\Temp",
+            "\\AppData\\Local\\Microsoft\\Windows\\INetCache",
+            "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache",
+            "\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Code Cache",
+            "\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache",
+            "\\AppData\\Local\\Packages\\",
+        ],
+        "ignore_processes": ["privacyguard", "python.exe"],
+    },
+}
+
+
+def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
+    """Load configuration from YAML file with fallback to default config."""
+    if os.path.exists(config_path) and yaml is not None:
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            logger.warning("Failed to parse %s: %s. Using default config.", config_path, e)
+    return DEFAULT_CONFIG
+
+
+def read_file_with_bom(path: str) -> str:
+    """Read file content detecting encoding via BOM (UTF-16 LE, UTF-16 BE, UTF-8-sig)."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw.startswith(b"\xff\xfe"):
+        content = raw.decode("utf-16-le", errors="replace")
+    elif raw.startswith(b"\xfe\xff"):
+        content = raw.decode("utf-16-be", errors="replace")
+    elif raw.startswith(b"\xef\xbb\xbf"):
+        content = raw.decode("utf-8-sig", errors="replace")
+    else:
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            content = raw.decode("latin-1")
+    return content.lstrip("\ufeff")
+
+
+def parse_utc_timestamp(ts_str: Optional[str]) -> float:
+    """Parse Sysmon UTC string or ISO timestamp into epoch seconds float."""
+    if not ts_str:
+        return time.time()
+    clean = ts_str.strip().replace("T", " ").rstrip("Z")
+    try:
+        if "." in clean:
+            parts = clean.split(".")
+            date_part = parts[0]
+            frac_part = parts[1][:6]
+            clean = f"{date_part}.{frac_part}"
+            dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S.%f")
+        else:
+            dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return time.time()
+
+
+def extract_domain(url: Optional[str]) -> str:
+    """Extract only the domain/host from a URL, stripping paths and query strings."""
+    if not url or url.strip() in ("", "-", "unknown"):
+        return "unknown"
+    target = url.strip()
+    try:
+        if not re.match(r"^[a-zA-Z]+://", target):
+            target = "http://" + target
+        parsed = urllib.parse.urlparse(target)
+        host = parsed.hostname or parsed.netloc
+        if host:
+            return host.lower().split(":")[0]
+    except Exception:
+        pass
+    return "unknown"
+
+
+def parse_zone_identifier_content(content: str) -> Dict[str, str]:
+    """Parse ZoneTransfer metadata from Zone.Identifier stream content."""
+    zone_id = "unknown"
+    host_domain = "unknown"
+    referrer_domain = "unknown"
+    for line in content.splitlines():
+        line = line.strip()
+        if line.startswith("ZoneId="):
+            zone_id = line.split("=", 1)[1].strip() or "unknown"
+        elif line.startswith("HostUrl="):
+            host_domain = extract_domain(line.split("=", 1)[1].strip())
+        elif line.startswith("ReferrerUrl="):
+            referrer_domain = extract_domain(line.split("=", 1)[1].strip())
+    return {
+        "zone_id": zone_id,
+        "host_domain": host_domain,
+        "referrer_domain": referrer_domain,
+    }
+
+
+def read_zone_identifier(base_path: str) -> Dict[str, str]:
+    """Attempt to read NTFS Alternate Data Stream :Zone.Identifier for a file path.
+
+    Returns dict with zone_id, host_domain, referrer_domain ('unknown' if absent).
+    Never raises an exception if the file or stream does not exist.
+    """
+    stream_path = f"{base_path}:Zone.Identifier"
+    try:
+        with open(stream_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        return parse_zone_identifier_content(content)
+    except Exception:
+        return {
+            "zone_id": "unknown",
+            "host_domain": "unknown",
+            "referrer_domain": "unknown",
+        }
+
+
+class SysmonParser:
+    """Parses Sysmon events from XML or text dumps and normalizes them."""
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or load_config()
+        self._init_mappings()
+        self.seen_dedup_keys: Set[Tuple[Any, ...]] = set()
+
+    def _init_mappings(self) -> None:
+        """Initialize event ID and field name lookups from config."""
+        events_cfg = self.config.get("sysmon", {}).get("events", {})
+        self.id_to_event_cfg: Dict[int, Dict[str, Any]] = {}
+        self.known_field_names: Set[str] = set()
+
+        for key, info in events_cfg.items():
+            eid = int(info.get("event_id", 0))
+            self.id_to_event_cfg[eid] = info
+            fields = info.get("fields", {})
+            for mapped_name in fields.values():
+                self.known_field_names.add(mapped_name)
+
+        # Standard Sysmon fields that may appear in event blocks
+        self.known_field_names.update({
+            "UtcTime", "ProcessGuid", "ProcessId", "Image", "FileVersion",
+            "Description", "Product", "Company", "OriginalFileName", "CommandLine",
+            "CurrentDirectory", "User", "LogonGuid", "LogonId", "TerminalSessionId",
+            "IntegrityLevel", "Hashes", "ParentProcessGuid", "ParentProcessId",
+            "ParentImage", "ParentCommandLine", "ParentUser", "Protocol", "Initiated",
+            "SourceIsIpv6", "SourceIp", "SourceHostname", "SourcePort", "SourcePortName",
+            "DestinationIsIpv6", "DestinationIp", "DestinationHostname", "DestinationPort",
+            "DestinationPortName", "TargetFilename", "CreationUtcTime"
+        })
+
+    def is_noise(self, event: Dict[str, Any]) -> bool:
+        """Check if an event matches noise filtering rules in config."""
+        filters = self.config.get("noise_filters", {})
+        if not filters.get("enabled", True):
+            return False
+
+        path = event.get("path") or ""
+        if path:
+            lower_path = path.lower()
+            for pattern in filters.get("path_patterns", []):
+                if pattern.lower() in lower_path:
+                    return True
+
+        return False
+
+    def normalize_event(
+        self, event_id: int, fields: Dict[str, str]
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Normalize parsed raw fields into schema objects.
+
+        Returns:
+            (event_dict, process_dict, zone_dict)
+        """
+        cfg = self.id_to_event_cfg.get(event_id)
+        if not cfg:
+            return None, None, None
+
+        field_map = cfg.get("fields", {})
+        event_type = cfg.get("type", "unknown")
+
+        utc_time_field = field_map.get("utc_time", "UtcTime")
+        proc_guid_field = field_map.get("process_guid", "ProcessGuid")
+        proc_id_field = field_map.get("process_id", "ProcessId")
+        image_field = field_map.get("image", "Image")
+
+        utc_str = fields.get(utc_time_field)
+        ts = parse_utc_timestamp(utc_str)
+        proc_guid = fields.get(proc_guid_field, "").strip()
+        if not proc_guid:
+            return None, None, None
+
+        try:
+            pid = int(fields.get(proc_id_field, 0))
+        except (ValueError, TypeError):
+            pid = 0
+
+        ppid = None
+        path = None
+        dest_ip = None
+        dest_port = None
+        proto = None
+        extra_json: Optional[Dict[str, Any]] = None
+
+        proc_record: Optional[Dict[str, Any]] = None
+        zone_record: Optional[Dict[str, Any]] = None
+
+        if event_id == 1:  # ProcessCreate
+            parent_pid_field = field_map.get("parent_process_id", "ParentProcessId")
+            try:
+                ppid = int(fields.get(parent_pid_field, 0)) if fields.get(parent_pid_field) else None
+            except (ValueError, TypeError):
+                ppid = None
+            path = fields.get(image_field)
+            exe_path = path
+            name = os.path.basename(exe_path) if exe_path else None
+            proc_record = {
+                "proc_key": proc_guid,
+                "pid": pid,
+                "ppid": ppid,
+                "name": name,
+                "exe_path": exe_path,
+                "signed": None,
+                "publisher": fields.get("Company"),
+                "start_ts": ts,
+                "end_ts": None,
+            }
+
+        elif event_id == 5:  # ProcessTerminate
+            path = fields.get(image_field)
+            proc_record = {
+                "proc_key": proc_guid,
+                "end_ts": ts,
+            }
+
+        elif event_id == 3:  # NetworkConnect
+            dest_ip = fields.get(field_map.get("dest_ip", "DestinationIp"))
+            dest_port_val = fields.get(field_map.get("dest_port", "DestinationPort"))
+            try:
+                dest_port = int(dest_port_val) if dest_port_val else None
+            except (ValueError, TypeError):
+                dest_port = None
+            proto = fields.get(field_map.get("protocol", "Protocol"))
+
+        elif event_id == 11:  # FileCreate
+            target_fn_field = field_map.get("target_filename", "TargetFilename")
+            raw_target_fn = fields.get(target_fn_field, "").strip()
+            if not raw_target_fn:
+                return None, None, None
+
+            # Deduplication rule: (ProcessGuid, TargetFilename, UtcTime)
+            dedup_key = (proc_guid, raw_target_fn, utc_str)
+            if dedup_key in self.seen_dedup_keys:
+                return None, None, None
+            self.seen_dedup_keys.add(dedup_key)
+
+            # Check if this is a Zone.Identifier Alternate Data Stream
+            if re.search(r":Zone\.Identifier.*$", raw_target_fn, flags=re.IGNORECASE):
+                base_path = re.sub(r":Zone\.Identifier.*$", "", raw_target_fn, flags=re.IGNORECASE)
+                path = base_path
+                zone_data = read_zone_identifier(base_path)
+                extra_json = {"zone": zone_data}
+                zone_record = {
+                    "path": base_path,
+                    "host_domain": zone_data["host_domain"],
+                    "referrer_domain": zone_data["referrer_domain"],
+                    "zone_id": zone_data["zone_id"],
+                    "proc_key": proc_guid,
+                    "ts": ts,
+                }
+            else:
+                path = raw_target_fn
+
+        event_record = {
+            "ts": ts,
+            "pid": pid,
+            "ppid": ppid,
+            "proc_key": proc_guid,
+            "type": event_type,
+            "path": path,
+            "dest_ip": dest_ip,
+            "dest_port": dest_port,
+            "proto": proto,
+            "nbytes": 0,
+            "extra_json": extra_json,
+        }
+
+        return event_record, proc_record, zone_record
+
+    def parse_text_block(
+        self, block: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Parse a single text block from Sysmon event dump."""
+        eid: Optional[int] = None
+        eid_m = re.search(r"Event ID:\s*(\d+)", block)
+        if eid_m:
+            eid = int(eid_m.group(1))
+        elif "File created:" in block:
+            eid = 11
+        elif "Process Create:" in block:
+            eid = 1
+        elif "Network connection detected:" in block:
+            eid = 3
+        elif "Process terminated:" in block:
+            eid = 5
+
+        if eid is None or eid not in self.id_to_event_cfg:
+            return None, None, None
+
+        fields: Dict[str, str] = {}
+        curr_key: Optional[str] = None
+
+        for line in block.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                line = line[1:].strip()
+
+            m = re.match(r"^([A-Za-z0-9_]+):\s*(.*)$", line)
+            if m and m.group(1) in self.known_field_names:
+                curr_key = m.group(1)
+                fields[curr_key] = m.group(2)
+            elif curr_key:
+                # Wrapped continuation of previous field value without adding space
+                fields[curr_key] += line
+
+        return self.normalize_event(eid, fields)
+
+    def parse_xml_event(
+        self, xml_content: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Parse a Sysmon event represented as XML string."""
+        try:
+            root = ET.fromstring(xml_content)
+        except Exception as e:
+            logger.debug("Failed to parse event XML: %s", e)
+            return None, None, None
+
+        # Handle namespaces by matching tag endings
+        def find_child(parent, tag_name):
+            for child in parent:
+                if child.tag.endswith(tag_name):
+                    return child
+            return None
+
+        system_elem = find_child(root, "System")
+        if system_elem is None:
+            return None, None, None
+
+        eid_elem = find_child(system_elem, "EventID")
+        if eid_elem is None or not eid_elem.text:
+            return None, None, None
+
+        try:
+            eid = int(eid_elem.text.strip())
+        except ValueError:
+            return None, None, None
+
+        if eid not in self.id_to_event_cfg:
+            return None, None, None
+
+        event_data_elem = find_child(root, "EventData")
+        fields: Dict[str, str] = {}
+        if event_data_elem is not None:
+            for d in event_data_elem:
+                name = d.attrib.get("Name")
+                if name:
+                    fields[name] = d.text or ""
+
+        # Fallback for UtcTime if not in EventData
+        if "UtcTime" not in fields:
+            time_created = find_child(system_elem, "TimeCreated")
+            if time_created is not None:
+                sys_time = time_created.attrib.get("SystemTime")
+                if sys_time:
+                    fields["UtcTime"] = sys_time
+
+        return self.normalize_event(eid, fields)
+
+    def parse_text_dump_file(
+        self, path: str, filter_noise: bool = True
+    ) -> List[Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]]:
+        """Parse a complete text dump file containing Sysmon events."""
+        raw_text = read_file_with_bom(path)
+        if "Event[" in raw_text:
+            blocks = re.split(r"\n(?=\s*Event\[\d+\]:)", raw_text)
+        else:
+            blocks = re.split(r"\n(?=\s*Computer:)", raw_text)
+
+        results = []
+        for block in blocks:
+            b = block.strip()
+            if not b:
+                continue
+            ev, pr, zn = self.parse_text_block(b)
+            if ev is not None:
+                if filter_noise and self.is_noise(ev):
+                    continue
+                results.append((ev, pr, zn))
+        return results
+
+
+class LiveSysmonCollector:
+    """Collects Sysmon events in real-time from Windows Event Log."""
+
+    def __init__(self, db_path: str = "data/privacyguard.db", config_path: str = "config.yaml"):
+        self.config = load_config(config_path)
+        self.store = EventStore(
+            db_path=db_path,
+            wal_mode=self.config.get("database", {}).get("wal_mode", True),
+        )
+        self.parser = SysmonParser(config=self.config)
+        self.channel = self.config.get("sysmon", {}).get("channel", "Microsoft-Windows-Sysmon/Operational")
+        self.batch_size = self.config.get("database", {}).get("batch_size", 500)
+        self.flush_interval = self.config.get("database", {}).get("flush_interval_sec", 1.0)
+        self.running = False
+        self.total_collected = 0
+        self.total_dropped = 0
+
+    def run_live(self, duration_sec: Optional[float] = None) -> None:
+        """Run live collection for specified duration or until interrupted."""
+        try:
+            import win32evtlog
+        except ImportError:
+            logger.error("pywin32 (win32evtlog) is required for live collection.")
+            return
+
+        logger.info("Opening Sysmon channel: %s", self.channel)
+        try:
+            query_handle = win32evtlog.EvtQuery(
+                self.channel,
+                win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryForwardDirection,
+            )
+        except Exception as e:
+            logger.error("Failed to query Sysmon channel (%s). Ensure this process runs as Administrator.", e)
+            return
+
+        self.running = True
+        start_time = time.time()
+        event_batch: List[Dict[str, Any]] = []
+        last_flush = time.time()
+
+        logger.info("Sysmon live collector started. Press Ctrl+C to stop.")
+        try:
+            while self.running:
+                if duration_sec and (time.time() - start_time) >= duration_sec:
+                    logger.info("Collection duration (%s seconds) reached.", duration_sec)
+                    break
+
+                try:
+                    events = win32evtlog.EvtNext(query_handle, 50, 1000)
+                except Exception as e:
+                    time.sleep(0.5)
+                    continue
+
+                if not events:
+                    if event_batch and (time.time() - last_flush) >= self.flush_interval:
+                        self.store.insert_events_batch(event_batch)
+                        event_batch.clear()
+                        last_flush = time.time()
+                    time.sleep(0.2)
+                    continue
+
+                for h_event in events:
+                    try:
+                        xml_data = win32evtlog.EvtRender(h_event, win32evtlog.EvtRenderEventXml)
+                        ev, pr, zn = self.parser.parse_xml_event(xml_data)
+                        if ev is not None:
+                            if self.parser.is_noise(ev):
+                                continue
+                            event_batch.append(ev)
+                            self.total_collected += 1
+                            if pr is not None:
+                                if "start_ts" in pr:
+                                    self.store.upsert_process(pr)
+                                elif "end_ts" in pr:
+                                    self.store.update_process_end(pr["proc_key"], pr["end_ts"])
+                            if zn is not None:
+                                self.store.upsert_file_zone(zn)
+                    except Exception as err:
+                        self.total_dropped += 1
+                        logger.debug("Error processing event: %s", err)
+
+                if len(event_batch) >= self.batch_size or (time.time() - last_flush) >= self.flush_interval:
+                    if event_batch:
+                        self.store.insert_events_batch(event_batch)
+                        event_batch.clear()
+                        last_flush = time.time()
+
+        except KeyboardInterrupt:
+            logger.info("Stop requested by user.")
+        finally:
+            if event_batch:
+                self.store.insert_events_batch(event_batch)
+                event_batch.clear()
+            self.running = False
+            self.store.close()
+            logger.info(
+                "Collector finished. Total collected: %d, dropped: %d",
+                self.total_collected,
+                self.total_dropped,
+            )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="PrivacyGuard Sysmon Collector & Parser")
+    parser.add_argument("--file", type=str, help="Path to text dump file to parse and import")
+    parser.add_argument("--db", type=str, default="data/privacyguard.db", help="Path to SQLite database")
+    parser.add_argument("--duration", type=float, default=60.0, help="Live collection duration in seconds")
+    parser.add_argument("--no-filter", action="store_true", help="Disable noise filtering")
+    args = parser.parse_args()
+
+    if args.file:
+        print(f"Reading file: {args.file}")
+        sysmon_parser = SysmonParser()
+        events = sysmon_parser.parse_text_dump_file(args.file, filter_noise=not args.no_filter)
+        print(f"Parsed {len(events)} valid events from {args.file}")
+        store = EventStore(db_path=args.db)
+        batch = []
+        for ev, pr, zn in events:
+            batch.append(ev)
+            if pr:
+                if "start_ts" in pr:
+                    store.upsert_process(pr)
+                elif "end_ts" in pr:
+                    store.update_process_end(pr["proc_key"], pr["end_ts"])
+            if zn:
+                store.upsert_file_zone(zn)
+        inserted = store.insert_events_batch(batch)
+        print(f"Inserted {inserted} events into {args.db}")
+        store.close()
+    else:
+        collector = LiveSysmonCollector(db_path=args.db)
+        collector.run_live(duration_sec=args.duration)
+
+
+if __name__ == "__main__":
+    main()
