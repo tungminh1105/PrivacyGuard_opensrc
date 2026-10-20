@@ -2,8 +2,8 @@
 
 Collects and parses Windows Sysmon operational logs (Event ID 1, 3, 5, 11).
 Normalizes events into the schema specified in SPEC Section 4.
-Supports live collection via win32evtlog EvtSubscribe (future events only by default)
-and offline replay from text dumps or backfill.
+Uses EventRecordID watermark polling every 1 second (no callback/subscription).
+Filters collector process and Sysmon binary events.
 """
 
 from __future__ import annotations
@@ -232,6 +232,39 @@ def read_zone_identifier(base_path: str) -> Dict[str, str]:
         }
 
 
+def extract_event_record_id_from_xml(xml_content: str) -> Optional[int]:
+    """Extract EventRecordID integer from event XML."""
+    try:
+        root = ET.fromstring(xml_content)
+        for child in root:
+            if child.tag.endswith("System"):
+                for sc in child:
+                    if sc.tag.endswith("EventRecordID") and sc.text:
+                        return int(sc.text.strip())
+    except Exception:
+        pass
+    return None
+
+
+def query_latest_record_id(channel: str) -> int:
+    """Query the largest EventRecordID currently present in the channel."""
+    try:
+        import win32evtlog
+        q = win32evtlog.EvtQuery(
+            channel,
+            win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryReverseDirection,
+        )
+        events = win32evtlog.EvtNext(q, 1)
+        if events:
+            xml_data = win32evtlog.EvtRender(events[0], win32evtlog.EvtRenderEventXml)
+            rid = extract_event_record_id_from_xml(xml_data)
+            if rid is not None:
+                return rid
+    except Exception as e:
+        logger.debug("Failed to query latest record ID from %s: %s", channel, e)
+    return 0
+
+
 class SysmonParser:
     """Parses Sysmon events from XML or text dumps and normalizes them."""
 
@@ -239,6 +272,7 @@ class SysmonParser:
         self.config = config or load_config()
         self._init_mappings()
         self.seen_dedup_keys: Set[Tuple[Any, ...]] = set()
+        self.collector_guid: Optional[str] = None
 
     def _init_mappings(self) -> None:
         """Initialize event ID and field name lookups from config."""
@@ -266,14 +300,26 @@ class SysmonParser:
         })
 
     def is_noise(self, event: Dict[str, Any]) -> bool:
-        """Check if an event matches noise filtering rules in config."""
+        """Check if an event matches noise filtering rules in config, or belongs to Sysmon / collector."""
+        path = event.get("path") or ""
+        lower_path = path.lower() if path else ""
+
+        # Filter sysmon service/executable itself
+        if "sysmon" in lower_path:
+            return True
+
+        # Filter collector's own process by PID or cached GUID
+        collector_pid = os.getpid()
+        if event.get("pid") == collector_pid:
+            return True
+        if self.collector_guid and event.get("proc_key") == self.collector_guid:
+            return True
+
         filters = self.config.get("noise_filters", {})
         if not filters.get("enabled", True):
             return False
 
-        path = event.get("path") or ""
-        if path:
-            lower_path = path.lower()
+        if lower_path:
             for pattern in filters.get("path_patterns", []):
                 if pattern.lower() in lower_path:
                     return True
@@ -320,6 +366,10 @@ class SysmonParser:
             pid = int(fields.get(proc_id_field, 0))
         except (ValueError, TypeError):
             pid = 0
+
+        # Track collector's own process GUID
+        if pid == os.getpid():
+            self.collector_guid = proc_guid
 
         ppid = None
         path = None
@@ -496,13 +546,7 @@ class SysmonParser:
         if eid not in self.id_to_event_cfg:
             return None, None, None
 
-        event_record_id: Optional[int] = None
-        rec_id_elem = find_child(system_elem, "EventRecordID")
-        if rec_id_elem is not None and rec_id_elem.text:
-            try:
-                event_record_id = int(rec_id_elem.text.strip())
-            except ValueError:
-                event_record_id = None
+        event_record_id = extract_event_record_id_from_xml(xml_content)
 
         event_data_elem = find_child(root, "EventData")
         fields: Dict[str, str] = {}
@@ -545,7 +589,7 @@ class SysmonParser:
 
 
 class LiveSysmonCollector:
-    """Collects Sysmon events in real-time from Windows Event Log."""
+    """Collects Sysmon events in real-time from Windows Event Log using watermark polling."""
 
     def __init__(
         self,
@@ -566,6 +610,7 @@ class LiveSysmonCollector:
         self.backfill = backfill
         self.max_queue_size = max_queue_size
 
+        self.watermark: int = 0
         self.event_queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
         self.running = False
         self.total_received = 0
@@ -614,11 +659,6 @@ class LiveSysmonCollector:
         """Process a single normalized event through filter, queue, and metrics."""
         self.total_received += 1
 
-        # Check timestamp against start_ts in live mode
-        if not self.backfill and ev.get("ts", 0.0) < (self.start_ts - 2.0):
-            # Ignore events occurring before collector start
-            return False
-
         if self.backfill and ev.get("ts", 0.0) < self.start_ts:
             self.historical_count += 1
 
@@ -633,6 +673,77 @@ class LiveSysmonCollector:
             logger.warning("Event queue full! Dropping event (total dropped: %d)", self.dropped_events)
             return False
 
+    def poll_once_from_events(
+        self, raw_events: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]]
+    ) -> int:
+        """Process a batch of events through polling logic using watermark (for test simulation)."""
+        accepted = 0
+        for ev, pr, zn in raw_events:
+            rec_id = None
+            extra = ev.get("extra_json")
+            if isinstance(extra, dict):
+                rec_id = extra.get("event_record_id")
+
+            # In live mode (not backfill), discard if <= watermark
+            if not self.backfill and rec_id is not None and rec_id <= self.watermark:
+                continue
+
+            if self.process_event(ev, pr, zn):
+                accepted += 1
+                if rec_id is not None and rec_id > self.watermark:
+                    self.watermark = rec_id
+        return accepted
+
+    def poll_channel(self) -> int:
+        """Query channel for events with EventRecordID > watermark."""
+        try:
+            import win32evtlog
+        except ImportError:
+            return 0
+
+        xpath = f"*[System[EventRecordID > {self.watermark}]]"
+        new_count = 0
+        try:
+            query_handle = win32evtlog.EvtQuery(
+                self.channel,
+                win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryForwardDirection,
+                xpath,
+            )
+        except Exception as e:
+            logger.debug("EvtQuery error on %s: %s", self.channel, e)
+            return 0
+
+        while True:
+            try:
+                events = win32evtlog.EvtNext(query_handle, 100)
+            except Exception:
+                break
+            if not events:
+                break
+
+            for h_ev in events:
+                try:
+                    xml_data = win32evtlog.EvtRender(h_ev, win32evtlog.EvtRenderEventXml)
+                    ev, pr, zn = self.parser.parse_xml_event(xml_data)
+                    if ev is not None:
+                        rec_id = None
+                        extra = ev.get("extra_json")
+                        if isinstance(extra, dict):
+                            rec_id = extra.get("event_record_id")
+
+                        if not self.backfill and rec_id is not None and rec_id <= self.watermark:
+                            continue
+
+                        if self.process_event(ev, pr, zn):
+                            new_count += 1
+                            if rec_id is not None and rec_id > self.watermark:
+                                self.watermark = rec_id
+                except Exception as err:
+                    self.dropped_events += 1
+                    logger.debug("Error processing event XML: %s", err)
+
+        return new_count
+
     def print_metrics(self) -> None:
         """Print summary session metrics including dropped ratio."""
         dropped_ratio = (
@@ -640,7 +751,8 @@ class LiveSysmonCollector:
         )
         print("\n" + "=" * 55)
         print("COLLECTOR SESSION METRICS:")
-        print(f"  Mode:                  {'Backfill (Historical)' if self.backfill else 'Live (Future Events Only)'}")
+        print(f"  Mode:                  {'Backfill (Historical)' if self.backfill else 'Live (Watermark Polling)'}")
+        print(f"  Final Watermark:       EventRecordID={self.watermark}")
         if self.backfill:
             print(f"  Historical events:     {self.historical_count}")
         print(f"  Total events received: {self.total_received}")
@@ -650,13 +762,20 @@ class LiveSysmonCollector:
         print("=" * 55 + "\n")
 
     def run_live(self, duration_sec: Optional[float] = None) -> None:
-        """Run live collection for specified duration or until interrupted."""
+        """Run watermark polling loop for specified duration or until interrupted."""
         try:
-            import win32event
             import win32evtlog
         except ImportError:
-            logger.error("pywin32 (win32evtlog, win32event) is required for live collection.")
+            logger.error("pywin32 (win32evtlog) is required for live collection.")
             return
+
+        # Determine starting watermark
+        if not self.backfill:
+            self.watermark = query_latest_record_id(self.channel)
+            logger.info("Live mode: Starting watermark set to EventRecordID=%d (ignoring earlier records)", self.watermark)
+        else:
+            self.watermark = 0
+            logger.info("Backfill mode: Ingesting historical events from beginning (watermark=0)")
 
         self.start_ts = time.time()
         self.running = True
@@ -665,53 +784,35 @@ class LiveSysmonCollector:
         writer_thread = threading.Thread(target=self._writer_worker, daemon=True)
         writer_thread.start()
 
-        # Create Win32 event for subscription notification
-        h_event = win32event.CreateEvent(None, 0, 0, None)
+        logger.info(
+            "Sysmon live collector active (channel: %s, polling: 1s, watermark: %d). Duration: %s seconds. Press Ctrl+C to stop.",
+            self.channel,
+            self.watermark,
+            duration_sec or "Unlimited",
+        )
 
-        if self.backfill:
-            logger.info("Backfill enabled: Ingesting historical events from channel %s...", self.channel)
-            sub_flags = win32evtlog.EvtSubscribeStartAtOldestRecord
-        else:
-            logger.info("Live mode: Subscribing to future events only on channel %s...", self.channel)
-            sub_flags = win32evtlog.EvtSubscribeToFutureEvents
-
-        try:
-            sub_handle = win32evtlog.EvtSubscribe(
-                self.channel,
-                sub_flags,
-                SignalEvent=h_event,
-            )
-        except Exception as e:
-            logger.error("Failed to subscribe to Sysmon channel (%s). Ensure this process runs as Administrator.", e)
-            self.running = False
-            writer_thread.join(timeout=1.0)
-            self.store.close()
-            return
-
-        logger.info("Sysmon live collector active. Duration: %s seconds. Press Ctrl+C to stop.", duration_sec or "Unlimited")
+        last_heartbeat = time.time()
         try:
             while self.running:
-                if duration_sec and (time.time() - self.start_ts) >= duration_sec:
+                now = time.time()
+                if duration_sec and (now - self.start_ts) >= duration_sec:
                     logger.info("Collection duration (%s seconds) reached.", duration_sec)
                     break
 
-                # Wait for event signal with 500ms timeout
-                rc = win32event.WaitForSingleObject(h_event, 500)
-                if rc == win32event.WAIT_OBJECT_0:
-                    try:
-                        events = win32evtlog.EvtNext(sub_handle, 50, 0)
-                    except Exception:
-                        events = []
+                # Poll channel for events newer than watermark
+                self.poll_channel()
 
-                    for h_ev in events:
-                        try:
-                            xml_data = win32evtlog.EvtRender(h_ev, win32evtlog.EvtRenderEventXml)
-                            ev, pr, zn = self.parser.parse_xml_event(xml_data)
-                            if ev is not None:
-                                self.process_event(ev, pr, zn)
-                        except Exception as err:
-                            self.dropped_events += 1
-                            logger.debug("Error processing event XML: %s", err)
+                # Print status every 10 seconds as requested
+                if now - last_heartbeat >= 10.0:
+                    elapsed = now - self.start_ts
+                    print(
+                        f"[{elapsed:3.0f}s] Live status: {self.total_received} events received, "
+                        f"{self.total_written} written, {self.dropped_events} dropped (current watermark: {self.watermark})",
+                        flush=True,
+                    )
+                    last_heartbeat = now
+
+                time.sleep(1.0)
 
         except KeyboardInterrupt:
             logger.info("Stop requested by user.")
