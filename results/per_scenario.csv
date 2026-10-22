@@ -1,0 +1,10 @@
+scenario,scenario_name,true_label,n_samples,RuleBased_rate,IsolationForest_rate,Autoencoder_rate,notes
+1,Scenario 1: Bulk Exfiltration,1,24,1.0,1.0,1.0,Bulk send + sensitive docs: easily detected by causal flow and network volume.
+2,Scenario 2: Slow Trickle Exfiltration,1,26,0.9231,0.9231,0.0,Slow trickle chunks: detected via provenance causal flow connecting file to network.
+3,Scenario 3: Compressed Archive Exfiltration,1,24,1.0,1.0,1.0,"Zip compression: creates temp file, causal flow links fake docs to zip to socket."
+4,Scenario 4: Subprocess Exfiltration,1,24,1.0,1.0,1.0,Subprocess spawn: parent-child process hierarchy propagates causal flow to child.
+5,Scenario 5: Port 443 Exfiltration,1,25,0.96,0.96,0.96,Port 443: detected by causal flow despite common HTTPS port destination.
+6,Scenario 6: Periodic Beaconing,1,24,1.0,0.7917,0.0,Periodic beacon: small file touch followed by periodic heartbeats.
+7,Scenario 7: Benign Cloud Sync,0,24,1.0,0.875,1.0,"Benign cloud sync: negative control (label 0), copies to fake_cloud without external socket."
+8,Scenario 8: Network-only Control,0,24,1.0,1.0,0.75,"Network-only control: negative control (label 0), network traffic without sensitive files."
+9,Scenario 9: File-read-only Control,0,28,1.0,0.75,1.0,"File-read-only control: negative control (label 0), Sysmon sees no network connection."

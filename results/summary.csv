@@ -1,0 +1,4 @@
+detector,precision,recall,f1,fpr,pr_auc,roc_auc,avg_detection_latency_sec,threshold,tp,fp,tn,fn
+RuleBased,1.0,0.9796,0.9897,0.0,0.9951,0.9898,60.0,0.5,144,0,138,3
+IsolationForest,0.9267,0.9456,0.936,0.0797,0.9724,0.9704,60.0,0.4172,139,11,127,8
+Autoencoder,0.64,0.6531,0.6465,0.3913,0.8405,0.7935,60.0,0.5,96,54,84,51

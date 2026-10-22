@@ -10,11 +10,19 @@
   - benign_sync.py: sao lưu lên data/fake_cloud (nhãn 0).
   - Đã chạy kiểm thử mỗi kịch bản đúng 1 lần: 9/9 kịch bản hoàn thành, tổng byte gửi và nhận khớp tuyệt đối (549.643 bytes).
   - Dừng chờ xác nhận trước khi chạy 15-30 lần/kịch bản.
-- Giai đoạn C (Provenance Engine & Feature Extraction): HOÀN TẤT cài đặt và unit tests.
+- Giai đoạn C (Provenance Engine & Feature Extraction): HOÀN TẤT cài đặt và unit tests (commit 5630bda).
   - core/sensitive.py: Nhận diện đường dẫn nhạy cảm và tính điểm nhạy cảm (get_sensitivity_score) dựa trên config.yaml.
   - core/intel.py: Phân loại IP nội bộ / private LAN, nhận diện tracker domain/IP, theo dõi đích đến mới xuất hiện (is_new_destination).
   - core/provenance.py: Dựng đồ thị nhân quả có hướng (NetworkX DiGraph) liên kết File -> Process -> Network Socket trong cửa sổ trượt Delta_T = 30s; hỗ trợ phân cấp cha-con tiến trình (ProcessHierarchy).
   - core/features.py: Trích xuất vector đặc trưng 17 chiều theo cửa sổ trượt từng tiến trình, tuân thủ đúng giới hạn Sysmon (chỉ dùng FileCreate, không bịa FileRead), khử hoàn toàn NaN/None.
-  - 34/34 unit tests passed (28 tests cũ + 6 tests mới cho Phase C).
+  - 35/35 unit tests passed.
+- Giai đoạn D (Models & Evaluation): HOÀN TẤT cài đặt, chạy thực nghiệm và kiểm chứng.
+  - models/rules.py: Rule-based Detector kết hợp causal flow, sensitive file ratio, network volume, new destination.
+  - models/iforest.py: Isolation Forest Detector unsupervised với RobustFeatureScaler, học trên mẫu lành tính.
+  - models/autoencoder.py: PyTorch MLP Autoencoder (17 -> 8 -> 4 -> 8 -> 17) tính anomaly score qua reconstruction error MSE, chuẩn hóa bằng RobustFeatureScaler.
+  - eval/dataset.py: Chạy lặp lại 9 kịch bản (--runs 12), thu thập và gắn nhãn cửa sổ ground-truth; phân tách Train/Val/Test theo thời gian và theo kịch bản (Train set 100% mẫu lành tính, không rò rỉ dữ liệu).
+  - eval/metrics.py: Đầy đủ Precision, Recall, F1, FPR, PR-AUC, ROC-AUC, detection latency và per-scenario metrics.
+  - eval/run_experiments.py: Tự động chạy toàn bộ pipeline thực nghiệm, xuất results/summary.csv và results/per_scenario.csv.
+  - 42/42 unit tests passed (35 cũ + 7 mới cho Phase D).
 - Sysmon: đang cài, tự chạy khi khởi động máy.
 - Quy tắc: không chạy phân tích rò rỉ trước khi có ground truth.

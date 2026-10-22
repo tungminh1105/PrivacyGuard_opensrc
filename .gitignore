@@ -23,6 +23,7 @@ FakeDocuments/
 data/FakeDocuments/
 fake_cloud/
 data/fake_cloud/
-results/
+results/*
+!results/*.csv
 data/pytest_tmp/
 
