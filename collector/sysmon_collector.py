@@ -123,7 +123,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache",
             "\\AppData\\Local\\Microsoft\\Windows\\INetCache",
         ],
-        "ignore_processes": ["privacyguard", "python.exe"],
+        "ignore_processes": ["privacyguard.exe", "collector", "streamlit"],
     },
     "simulator": {
         "receiver_host": "127.0.0.1",

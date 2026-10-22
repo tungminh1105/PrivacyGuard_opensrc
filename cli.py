@@ -23,6 +23,15 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def cmd_collect(args: argparse.Namespace) -> None:
     """Run Sysmon live telemetry collector."""
@@ -178,6 +187,45 @@ def cmd_tray(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_test_alert(args: argparse.Namespace) -> None:
+    """Trigger a synthetic High-Risk alert, write to DB, and fire Windows Toast notification."""
+    from core.guard_service import trigger_manual_test_alert
+
+    db_path = getattr(args, "db", "data/privacyguard.db")
+    proc = getattr(args, "proc", "python.exe")
+    dest = getattr(args, "dest", "127.0.0.1:8765")
+    file_name = getattr(args, "file", "hop_dong_kinh_te.docx")
+
+    print("\n" + "=" * 65)
+    print("      PRIVACYGUARD REAL-TIME TOAST NOTIFICATION TEST")
+    print("=" * 65)
+    print(f"[*] Target Database:      {db_path}")
+    print(f"[*] Simulated Leaker App: {proc}")
+    print(f"[*] Targeted Document:    {file_name}")
+    print(f"[*] Exfiltration Target:  {dest}")
+    print("[*] Generating high-risk alert & firing Windows Toast...")
+
+    result = trigger_manual_test_alert(
+        db_path=db_path,
+        proc_name=proc,
+        dest_str=dest,
+        sample_file=file_name,
+    )
+
+    alert_id = result.get("alert_id")
+    delivered = result.get("delivered", False)
+    score = result.get("score", 0.95)
+
+    print(f"[+] Alert #{alert_id} successfully saved into '{db_path}' (Risk Score: {score * 100:.0f}%).")
+    if delivered:
+        print("[+] Windows Toast Notification delivered to system notification center.")
+    else:
+        print("[!] Toast displayed via secondary Windows notification mechanism.")
+    print("[*] Check the bottom-right corner of your screen for the popup alert.")
+    print("[*] You can view this alert in the Web Dashboard (python cli.py ui).")
+    print("=" * 65 + "\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build root CLI parser."""
     parser = argparse.ArgumentParser(
@@ -192,6 +240,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_tray.add_argument("--interval", type=float, default=10.0, help="Polling interval in seconds (default: 10)")
     p_tray.add_argument("--port", type=int, default=8501, help="Streamlit dashboard port (default: 8501)")
     p_tray.set_defaults(func=cmd_tray)
+
+    # test-alert
+    p_test_alert = subparsers.add_parser("test-alert", help="Trigger a test alert & Windows Toast notification")
+    p_test_alert.add_argument("--db", type=str, default="data/privacyguard.db", help="Path to SQLite database")
+    p_test_alert.add_argument("--proc", type=str, default="python.exe", help="Simulated process name")
+    p_test_alert.add_argument("--dest", type=str, default="127.0.0.1:8765", help="Simulated network destination")
+    p_test_alert.add_argument("--file", type=str, default="hop_dong_kinh_te.docx", help="Simulated sensitive file")
+    p_test_alert.set_defaults(func=cmd_test_alert)
 
     # collect
     p_collect = subparsers.add_parser("collect", help="Run Sysmon live telemetry collector")

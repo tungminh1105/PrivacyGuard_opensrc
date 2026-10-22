@@ -196,3 +196,53 @@ def test_tray_app_root_and_python_resolution(monkeypatch):
     # Test is_port_listening returns boolean without crashing
     closed_check = is_port_listening("127.0.0.1", 59999, timeout=0.1)
     assert isinstance(closed_check, bool)
+
+
+def test_guard_service_trigger_test_alert(temp_guard_workspace):
+    """Verify trigger_test_alert and trigger_manual_test_alert synthesize and persist alert."""
+    from core.guard_service import trigger_manual_test_alert
+
+    db_path = temp_guard_workspace["db_path"]
+    service = RealtimeGuardService(db_path=db_path, enable_toast=False)
+
+    try:
+        res = service.trigger_test_alert(
+            proc_name="python.exe",
+            pid=8888,
+            dest_str="127.0.0.1:8765",
+            sample_file="hop_dong_kinh_te.docx",
+            score=0.95,
+        )
+
+        assert res["alert_id"] == 1
+        assert res["proc_name"] == "python.exe"
+        assert res["pid"] == 8888
+        assert res["score"] == 0.95
+        assert isinstance(res["delivered"], bool)
+
+        # Check DB
+        alerts = service.store.get_alerts()
+        assert len(alerts) == 1
+        alert = alerts[0]
+        assert alert["proc_key"] == "python.exe:8888"
+        assert alert["detector"] == "TestAlertSimulator"
+        assert alert["score"] == 0.95
+
+        ev = json.loads(alert["evidence"])
+        assert "hop_dong_kinh_te.docx" in ev["sample_files_summary"]
+        assert ev["dest_str"] == "127.0.0.1:8765"
+        assert ev["risk_pct"] == 95
+        assert "CẢNH BÁO NGUY HIỂM" in ev["narrative"]
+    finally:
+        service.stop()
+
+    # Test standalone helper function
+    manual_res = trigger_manual_test_alert(
+        db_path=db_path,
+        proc_name="python.exe",
+        dest_str="127.0.0.1:8765",
+        sample_file="hop_dong_kinh_te.docx",
+    )
+    assert manual_res["alert_id"] == 2
+    assert manual_res["score"] == 0.95
+
