@@ -297,6 +297,51 @@ class EventStore:
         row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
+    def insert_alert(
+        self,
+        ts: float,
+        proc_key: str,
+        detector: str,
+        score: float,
+        severity: str,
+        evidence: str,
+        window_id: Optional[int] = None,
+        status: str = "new",
+    ) -> int:
+        """Insert a detected anomaly alert into the alerts table."""
+        sql = """
+        INSERT INTO alerts (ts, proc_key, window_id, detector, score, severity, evidence, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        with self.conn:
+            cur = self.conn.execute(
+                sql,
+                (
+                    float(ts),
+                    str(proc_key),
+                    window_id,
+                    str(detector),
+                    float(score),
+                    str(severity),
+                    str(evidence),
+                    str(status),
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def get_alerts(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Retrieve recorded alerts ordered by timestamp descending."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM alerts ORDER BY ts DESC LIMIT ? OFFSET ?", (limit, offset))
+        return [dict(row) for row in cur.fetchall()]
+
+    def count_alerts(self) -> int:
+        """Return total count of recorded alerts."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM alerts")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
     def close(self) -> None:
         """Close database connection."""
         try:

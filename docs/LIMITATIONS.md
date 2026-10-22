@@ -70,4 +70,29 @@ Because Sysmon lacks a `file_read` event provider (as detailed in Limitation 1),
 - **Scenario 7 (Benign Cloud Backup)**: Copies files to `data/fake_cloud`, creating `file_create` (Event 11) events for the destination files, with zero network connections.
 - **Scenario 9 (File-Read-Only Control)**: Only reads files without network activity. Because Sysmon does not log file reads, Scenario 9 produces **zero** file events and **zero** network events.
 
+---
+
+## 8. Autoencoder Sensitivity to Low-Volume and Trickle Patterns
+- **Limitation**: The deep-learning MLP Autoencoder scores anomalies via Mean Squared Error (MSE) reconstruction loss across all 17 feature dimensions.
+- **Impact on Scenarios 2 & 6**:
+  - In large bulk exfiltrations (Scenarios 1, 3, 5), reconstruction error is high across byte volume, causal flow, and sensitive ratios, leading to reliable detection.
+  - However, in Scenario 2 (Slow Trickle) and Scenario 6 (Periodic Beaconing), transmission volumes per window are minimal. The subtle anomaly in network burstiness or low byte counts is often diluted by the remaining 15 feature dimensions, resulting in lower recall (~65.3%) and higher false negatives compared to the Rule-Based engine ($F_1 = 0.9897$) and Isolation Forest ($F_1 = 0.9360$).
+- **Scientific Implication**: Unsupervised Autoencoders must be complemented with temporal sequence models (e.g., LSTM/GRU or sliding Markov chains) or rule-based causal flow gates to effectively capture low-and-slow exfiltration.
+
+---
+
+## 9. Administrative Privilege Requirement for Sysmon Driver
+- **Limitation**: Microsoft Sysmon relies on a ring-0 kernel minifilter driver (`SysmonDrv.sys`) and an operational event channel.
+- **Deployment Constraint**:
+  - Installing, updating, or configuring Sysmon XML schemas requires elevated Administrator privileges on Windows.
+  - Although the PrivacyGuard Collector (`sysmon_collector.py`) and UI execute safely in user mode without requiring kernel write access, any target system must have Sysmon pre-installed by an administrator.
+
+---
+
+## 10. Causality-Based Inference vs. Cryptographic Payload Proof
+- **Ethical & Privacy Design Choice**: PrivacyGuard deliberately avoids installing self-signed root CA certificates or deploying TLS/HTTPS man-in-the-middle proxies.
+- **Consequence**:
+  - Detection relies on temporal and spatial provenance: proving that process $P$ accessed sensitive file $F$ and subsequently initiated connection to socket $S$ within temporal window $\Delta t = 30s$ with outbound traffic volume $V$.
+  - While this provides a strong causal chain without invading user privacy or breaking end-to-end encryption, it constitutes probabilistic causal correlation rather than cryptographic proof of payload plaintext.
+
 

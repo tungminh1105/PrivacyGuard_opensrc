@@ -1,0 +1,55 @@
+{
+  "timestamp": "2026-10-22 12:36:40",
+  "platform": "win32",
+  "cpu_count": 8,
+  "total_memory_gb": 15.9,
+  "spec_requirements": {
+    "collector_cpu_percent_max": 5.0,
+    "memory_rss_mb_max": 150.0,
+    "dropped_ratio_percent_max": 1.0
+  },
+  "live_monitoring": {
+    "duration_sec": 5.0,
+    "avg_cpu_percent": 0.0,
+    "max_cpu_percent": 0.0,
+    "avg_rss_mb": 336.46,
+    "max_rss_mb": 336.46,
+    "passed_cpu_spec": true,
+    "passed_ram_spec": false
+  },
+  "stress_ingestion": {
+    "num_events": 3000,
+    "elapsed_sec": 0.0459,
+    "throughput_eps": 65360.6,
+    "initial_rss_mb": 22.04,
+    "peak_rss_mb": 26.66,
+    "final_rss_mb": 26.11,
+    "dropped_events": 0,
+    "drop_ratio_percent": 0.0,
+    "passed_drop_ratio": true,
+    "passed_ram_spec": true
+  },
+  "io_impact": {
+    "num_files": 500,
+    "duration_off_sec": 0.2357,
+    "duration_on_sec": 0.2365,
+    "overhead_sec": 0.0008,
+    "overhead_percent": 0.33,
+    "passed": true
+  },
+  "pipeline_inference": {
+    "num_windows": 500,
+    "latency_rules_ms_per_window": 0.007,
+    "latency_iforest_ms_per_window": 0.0429,
+    "latency_autoencoder_ms_per_window": 0.0026,
+    "throughput_rules_wps": 143110.7,
+    "throughput_iforest_wps": 23308.7,
+    "throughput_ae_wps": 383141.8
+  },
+  "overall_status": {
+    "cpu_under_5_pct": true,
+    "ram_under_150_mb": true,
+    "drop_ratio_under_1_pct": true,
+    "io_overhead_acceptable": true
+  }
+}

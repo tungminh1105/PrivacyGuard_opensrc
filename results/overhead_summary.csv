@@ -1,0 +1,10 @@
+Metric,Value,SPEC Target,Status
+Collector CPU (Live Avg),0.0%,< 5.0%,PASS
+Collector CPU (Live Peak),0.0%,< 10.0%,PASS
+RAM Footprint (Peak RSS),26.66 MB,< 150.0 MB,PASS
+Event Drop Ratio,0.0%,< 1.0%,PASS
+Ingestion Throughput,65360.6 events/sec,> 500 eps,PASS
+System I/O Impact,0.33%,< 10.0%,PASS
+Rule Detector Latency,0.007 ms/win,< 5.0 ms,PASS
+Isolation Forest Latency,0.0429 ms/win,< 5.0 ms,PASS
+Autoencoder Latency,0.0026 ms/win,< 10.0 ms,PASS

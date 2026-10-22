@@ -15,6 +15,11 @@ ENV/
 .coverage
 htmlcov/
 
+# PyInstaller
+build/
+dist/
+*.spec
+
 # Project Data & DB
 data/*.db*
 data/*.csv
@@ -25,5 +30,6 @@ fake_cloud/
 data/fake_cloud/
 results/*
 !results/*.csv
+!results/*.json
 data/pytest_tmp/
 
