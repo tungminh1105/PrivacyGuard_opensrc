@@ -24,5 +24,14 @@
   - eval/metrics.py: Đầy đủ Precision, Recall, F1, FPR, PR-AUC, ROC-AUC, detection latency và per-scenario metrics.
   - eval/run_experiments.py: Tự động chạy toàn bộ pipeline thực nghiệm, xuất results/summary.csv và results/per_scenario.csv.
   - 42/42 unit tests passed (35 cũ + 7 mới cho Phase D).
+- Giai đoạn E (Evidence Explanation & Streamlit Dashboard): HOÀN TẤT cài đặt và kiểm thử.
+  - core/explain.py: Chuyển đổi điểm bất thường số học thành chuỗi dẫn chứng trực quan, có cấu trúc; chuẩn hóa định dạng câu tường thuật theo SPEC; ẩn danh hóa đường dẫn người dùng (`C:\Users\***\...`); sinh lệnh firewall mẫu (netsh) an toàn.
+  - ui/app.py: Dashboard 4 tab bằng Streamlit & Plotly theo SPEC mục 10:
+    + Tab 1: Tổng quan (Overview) - Metrics hệ thống, biểu đồ phân bố rủi ro theo tiến trình, cảnh báo gần nhất.
+    + Tab 2: Dòng thời gian & Cảnh báo (Timeline & Alerts) - Lọc theo thời gian & mức độ rủi ro, xem chuỗi chứng cứ chi tiết, nút sinh lệnh chặn mạng an toàn (chỉ copy, không tự chạy).
+    + Tab 3: Đồ thị nhân quả (Provenance Graph Viewer) - Trực quan hóa NetworkX DiGraph qua Plotly với phân tầng File -> Process -> Network Socket và đánh dấu cạnh CAUSAL_FLOW.
+    + Tab 4: Kết quả đánh giá mô hình (Model Evaluation) - Bảng và biểu đồ trực quan summary.csv, radar chart đa chiều, per_scenario.csv, phân tích độ trễ.
+  - tests/test_explain.py: 5 unit tests mới kiểm tra định dạng narrative, path redaction, missing fields robustness, và firewall rule formatting.
+  - 47/47 unit tests passed (42 cũ + 5 mới).
 - Sysmon: đang cài, tự chạy khi khởi động máy.
 - Quy tắc: không chạy phân tích rò rỉ trước khi có ground truth.
