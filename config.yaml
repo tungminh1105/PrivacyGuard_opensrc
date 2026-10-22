@@ -81,3 +81,54 @@ simulator:
   fake_cloud_dir: "data/fake_cloud"
   ground_truth_path: "data/ground_truth.csv"
 
+sensitive_paths:
+  directories:
+    - "Documents"
+    - "FakeDocuments"
+    - "Desktop"
+    - "Downloads"
+    - "Pictures"
+    - ".ssh"
+    - ".aws"
+  file_patterns:
+    - "Login Data"
+    - "Cookies"
+    - "Local State"
+    - "Web Data"
+    - "credential"
+    - "password"
+    - "token"
+    - "secret"
+    - "hop_dong"
+    - "bang_luong"
+    - "bao_cao"
+    - "cmnd"
+    - "can_cuoc"
+    - "sao_ke"
+  sensitive_extensions:
+    - ".docx"
+    - ".xlsx"
+    - ".pdf"
+    - ".kdbx"
+    - ".pem"
+    - ".key"
+    - ".ppk"
+    - ".pfx"
+    - ".p12"
+    - ".env"
+    - ".csv"
+  zero_score_patterns:
+    - "C:\\Windows\\System32"
+    - "C:\\Windows\\WinSxS"
+    - "C:\\Windows\\Prefetch"
+
+threat_intel:
+  tracker_domains:
+    - "google-analytics.com"
+    - "doubleclick.net"
+    - "facebook.net"
+    - "telemetry"
+    - "metrics"
+    - "adservice"
+
+

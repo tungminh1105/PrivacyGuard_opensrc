@@ -24,4 +24,5 @@ data/FakeDocuments/
 fake_cloud/
 data/fake_cloud/
 results/
+data/pytest_tmp/
 
