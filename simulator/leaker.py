@@ -448,6 +448,15 @@ def run_leaker(
     return results
 
 
+def run_all_scenarios(runs: int = 1, seed: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Execute all 9 scenarios sequentially."""
+    all_res = []
+    for sc in range(1, 10):
+        res = run_leaker(scenario=sc, runs=runs, seed=seed)
+        all_res.extend(res)
+    return all_res
+
+
 def main():
     parser = argparse.ArgumentParser(description="PrivacyGuard Exfiltration & Control Simulator")
     parser.add_argument("--scenario", type=int, required=True, help="Scenario ID (1-9)")

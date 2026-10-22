@@ -56,12 +56,11 @@ def cmd_collect(args: argparse.Namespace) -> None:
 
 def cmd_simulate(args: argparse.Namespace) -> None:
     """Run synthetic exfiltration scenarios."""
-    from simulator.make_fake_docs import generate_fake_documents
-    from simulator.receiver import run_receiver_server
-    from simulator.leaker import run_all_scenarios
+    from simulator.make_fake_docs import create_fake_documents
+    from simulator.leaker import run_all_scenarios, run_leaker
 
     print(f"[*] Ensuring synthetic test documents in data/FakeDocuments...")
-    generate_fake_documents(output_dir="data/FakeDocuments", count=100)
+    create_fake_documents(target_dir="data/FakeDocuments", count=100)
 
     print(f"[*] Starting local TCP receiver server on port 8765...")
     receiver_proc = subprocess.Popen(
@@ -70,8 +69,13 @@ def cmd_simulate(args: argparse.Namespace) -> None:
     )
     time.sleep(1.0)
     try:
-        print(f"[*] Executing leaker scenarios (--runs {args.runs}, --seed {args.seed})...")
-        run_all_scenarios(runs=args.runs, seed=args.seed)
+        sc = getattr(args, "scenario", None)
+        if sc is not None:
+            print(f"[*] Executing single attack scenario {sc} (runs: {args.runs})...")
+            run_leaker(scenario=sc, runs=args.runs, seed=args.seed)
+        else:
+            print(f"[*] Executing all leaker scenarios (--runs {args.runs}, --seed {args.seed})...")
+            run_all_scenarios(runs=args.runs, seed=args.seed)
         print(f"[+] Simulation completed. Ground truth saved to data/ground_truth.csv")
     finally:
         receiver_proc.terminate()
@@ -200,6 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # simulate
     p_sim = subparsers.add_parser("simulate", help="Run synthetic exfiltration scenarios")
+    p_sim.add_argument("--scenario", type=int, default=None, help="Specific scenario ID (1-9, default: all)")
     p_sim.add_argument("--runs", type=int, default=1, help="Runs per scenario (default: 1)")
     p_sim.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     p_sim.set_defaults(func=cmd_simulate)

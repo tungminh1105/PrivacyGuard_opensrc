@@ -141,6 +141,10 @@ def create_fake_documents(
     return created_paths
 
 
+# Backward compatibility alias
+generate_fake_documents = create_fake_documents
+
+
 def main():
     parser = argparse.ArgumentParser(description="Create synthetic fake documents for PrivacyGuard")
     parser.add_argument("--dir", type=str, default="data/FakeDocuments", help="Target FakeDocuments directory")
