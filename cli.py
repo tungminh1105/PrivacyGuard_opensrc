@@ -161,6 +161,19 @@ def cmd_info(args: argparse.Namespace) -> None:
     print("=" * 60 + "\n")
 
 
+def cmd_tray(args: argparse.Namespace) -> None:
+    """Launch PrivacyGuard in Windows system tray."""
+    from ui.tray_app import run_tray_app
+
+    print("[*] Starting PrivacyGuard System Tray Application...")
+    print("[*] Minimized to Windows taskbar notification tray.")
+    run_tray_app(
+        db_path=getattr(args, "db", "data/privacyguard.db"),
+        polling_interval=getattr(args, "interval", 10.0),
+        dashboard_port=getattr(args, "port", 8501),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build root CLI parser."""
     parser = argparse.ArgumentParser(
@@ -168,6 +181,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="PrivacyGuard: Data Provenance & Anomaly Detection System for Windows",
     )
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")
+
+    # tray
+    p_tray = subparsers.add_parser("tray", help="Launch System Tray Icon application (default)")
+    p_tray.add_argument("--db", type=str, default="data/privacyguard.db", help="Path to SQLite database")
+    p_tray.add_argument("--interval", type=float, default=10.0, help="Polling interval in seconds (default: 10)")
+    p_tray.add_argument("--port", type=int, default=8501, help="Streamlit dashboard port (default: 8501)")
+    p_tray.set_defaults(func=cmd_tray)
 
     # collect
     p_collect = subparsers.add_parser("collect", help="Run Sysmon live telemetry collector")
@@ -210,10 +230,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
-    parser = build_parser()
+    # If executed without arguments (e.g. double-clicked exe or running python cli.py),
+    # launch the System Tray application by default instead of printing help and exiting.
     if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
+        from ui.tray_app import run_tray_app
+        print("[*] Launching PrivacyGuard Real-time Protection in Windows System Tray...")
+        run_tray_app()
+        return
+
+    parser = build_parser()
     args = parser.parse_args()
     if hasattr(args, "func"):
         args.func(args)

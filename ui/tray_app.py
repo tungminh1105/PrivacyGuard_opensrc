@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -33,12 +34,48 @@ from core.guard_service import RealtimeGuardService
 logger = logging.getLogger(__name__)
 
 
+def get_asset_path(filename: str) -> Optional[str]:
+    """Resolve asset file path across standalone executable and source environments.
+
+    Supports PyInstaller bundle directory (sys._MEIPASS), standalone exe folder,
+    and repository source directory.
+    """
+    candidates = []
+    # 1. PyInstaller temporary extraction folder
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(os.path.join(sys._MEIPASS, "assets", filename))
+        candidates.append(os.path.join(sys._MEIPASS, filename))
+    # 2. Directory containing the running executable
+    if hasattr(sys, "executable") and sys.executable:
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exe_dir, "assets", filename))
+        candidates.append(os.path.join(exe_dir, filename))
+    # 3. Project root directory
+    candidates.append(os.path.join(PROJECT_ROOT, "assets", filename))
+    candidates.append(os.path.join(PROJECT_ROOT, filename))
+
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+def get_python_executable() -> str:
+    """Find appropriate python interpreter whether running in venv or frozen mode."""
+    if not getattr(sys, "frozen", False) and "python" in os.path.basename(sys.executable).lower():
+        return sys.executable
+    venv_py = os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe")
+    if os.path.exists(venv_py):
+        return venv_py
+    sys_py = shutil.which("python")
+    return sys_py or "python"
+
+
 def create_shield_icon_image(size: int = 64, color: tuple = (16, 185, 129)) -> Image.Image:
     """Dynamically generate a professional cybersecurity shield icon using Pillow."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    # Scale coordinates to given size
     scale = size / 64.0
 
     def pt(x, y):
@@ -58,7 +95,7 @@ def create_shield_icon_image(size: int = 64, color: tuple = (16, 185, 129)) -> I
 
     d.polygon(shield_pts, fill=fill_rgba, outline=outline_rgba, width=max(1, int(2 * scale)))
 
-    # Inner checkmark / lock accent in white
+    # Inner checkmark in white
     check_pts = [pt(22, 32), pt(29, 40), pt(44, 22)]
     d.line(check_pts, fill=(255, 255, 255, 255), width=max(2, int(4 * scale)))
 
@@ -87,8 +124,8 @@ class PrivacyGuardTrayApp:
         self._icon: Optional[pystray.Icon] = None
 
         # Load or generate icon image
-        icon_path = os.path.join(PROJECT_ROOT, "assets", "icon.png")
-        if os.path.exists(icon_path):
+        icon_path = get_asset_path("icon.png") or get_asset_path("icon.ico")
+        if icon_path and os.path.exists(icon_path):
             try:
                 self.icon_image = Image.open(icon_path)
             except Exception:
@@ -124,11 +161,12 @@ class PrivacyGuardTrayApp:
         """Launch Streamlit web dashboard in background and open default browser."""
         url = f"http://localhost:{self.dashboard_port}"
         app_script = os.path.join(PROJECT_ROOT, "ui", "app.py")
+        py_exe = get_python_executable()
 
         # Start Streamlit if not already running
         if self._streamlit_proc is None or self._streamlit_proc.poll() is not None:
             cmd = [
-                sys.executable,
+                py_exe,
                 "-m",
                 "streamlit",
                 "run",
@@ -148,7 +186,6 @@ class PrivacyGuardTrayApp:
                     stderr=subprocess.DEVNULL,
                 )
                 logger.info("Launched Streamlit Dashboard daemon (PID: %s)", self._streamlit_proc.pid)
-                # Give server brief time to initialize
                 time.sleep(1.5)
             except Exception as e:
                 logger.error("Failed to start Streamlit: %s", e)
@@ -212,9 +249,22 @@ class PrivacyGuardTrayApp:
         self._icon.run()
 
 
-def main():
-    app = PrivacyGuardTrayApp()
+def run_tray_app(
+    db_path: str = "data/privacyguard.db",
+    polling_interval: float = 10.0,
+    dashboard_port: int = 8501,
+) -> None:
+    """Launch PrivacyGuard System Tray Application."""
+    app = PrivacyGuardTrayApp(
+        db_path=db_path,
+        polling_interval=polling_interval,
+        dashboard_port=dashboard_port,
+    )
     app.run()
+
+
+def main():
+    run_tray_app()
 
 
 if __name__ == "__main__":
