@@ -140,43 +140,70 @@ class EvidenceExplainer:
         )
         dest_str = f"{dest_ip}:{dest_port}"
 
-        # 5. Build Causal Chain
+        # 5. Build Causal Chain in user-friendly terms
         causal_chain = []
         if has_causal:
             causal_chain = [
-                f"Tệp nhạy cảm ({sample_file_str})",
-                f"Tiến trình {proc_name} (PID: {pid})",
-                f"Kết nối mạng ({dest_str})",
+                f"📂 Tệp nhạy cảm của bạn ({sample_file_str})",
+                f"⚙️ Ứng dụng nghi vấn: {proc_name} (Mã tiến trình: {pid})",
+                f"🌐 Máy chủ nhận dữ liệu ngoài Internet ({dest_str})",
             ]
-            causal_flow_text = "File -> Process -> Network Socket"
+            causal_flow_text = "Tệp của bạn ➔ Ứng dụng lấy tệp ➔ Máy chủ bên ngoài"
         else:
             causal_flow_text = "Không phát hiện đường truyền trực tiếp"
 
-        # 6. Format standard narrative string requested
-        bytes_str = format_bytes_human(bytes_sent) if bytes_sent > 0 else "kết nối"
+        # 6. Format storytelling narrative requested
+        bytes_str = format_bytes_human(bytes_sent) if bytes_sent > 0 else "dữ liệu"
+        risk_pct = int(round(sc_val * 100))
+        n_files = max(1, n_sensitive if n_sensitive > 0 else n_file_create)
+
+        if severity == "Cao":
+            alert_header = "🔴 [CẢNH BÁO NGUY HIỂM: PHÁT HIỆN GỬI TRỘM DỮ LIỆU]"
+            action_desc = (
+                f"Ứng dụng này vừa lén mở/tạo {n_files} tệp nhạy cảm của bạn "
+                f"({sample_file_str}) và ngay lập tức gửi {bytes_str} ra một máy chủ lạ trên mạng ({dest_str})."
+            )
+            advice = 'Hãy bấm nút "Chặn ứng dụng này" bên dưới để ngắt ngay đường truyền mạng của ứng dụng!'
+            headline = f"🚨 [Nguy hiểm cao] Phát hiện ứng dụng {proc_name} gửi trộm dữ liệu ra ngoài"
+        elif severity == "Trung bình":
+            alert_header = "🟡 [CẢNH BÁO ĐÁNG NGỜ: CÓ DẤU HIỆU TRUY CẬP BẤT THƯỜNG]"
+            action_desc = (
+                f"Ứng dụng này đã truy cập {n_files} tệp của bạn ({sample_file_str}) "
+                f"và phát sinh lưu lượng {bytes_str} tới máy chủ {dest_str}."
+            )
+            advice = "Hãy quan sát thêm hành vi hoặc quét virus nếu bạn không chủ động mở phần mềm này."
+            headline = f"⚠️ [Đáng ngờ] Ứng dụng {proc_name} có hành vi truy cập dữ liệu lạ"
+        else:
+            alert_header = "🟢 [THÔNG TIN AN TOÀN: TIẾN TRÌNH HOẠT ĐỘNG BÌNH THƯỜNG]"
+            action_desc = (
+                f"Ứng dụng đang xử lý {n_files} tệp ({sample_file_str}) trong ngưỡng hoạt động an toàn thông thường."
+            )
+            advice = "Ứng dụng an toàn, bạn không cần thực hiện thêm thao tác nào."
+            headline = f"🛡️ [Bình thường] Ứng dụng {proc_name} hoạt động bình thường"
+
         narrative = (
-            f"[Cảnh báo Rủi ro {severity}] Tiến trình {proc_name} (PID: {pid}) "
-            f"đã đọc/tạo {max(1, n_sensitive if n_sensitive > 0 else n_file_create)} file nhạy cảm "
-            f"({sample_file_str}) và gửi {bytes_str} tới {dest_str} ({country_or_domain}). "
-            f"Điểm bất thường: {sc_val:.2f} (Mô hình: {detector_name}). "
-            f"Đường dẫn nhân quả: {causal_flow_text}."
+            f"{alert_header}\n"
+            f"- Ứng dụng nghi vấn: {proc_name} (Mã tiến trình: {pid})\n"
+            f"- Hành vi bị bắt quả tang: {action_desc}\n"
+            f"- Đánh giá của AI: Điểm rủi ro {risk_pct}/100.\n"
+            f"- Lời khuyên an toàn: {advice}"
         )
 
-        # 7. Contributing factors
+        # 7. Contributing factors (Simplified and friendly)
         factors = []
         if has_causal:
-            factors.append("Tồn tại chuỗi nhân quả trực tiếp từ tệp nhạy cảm đến cổng mạng (CAUSAL_FLOW).")
+            factors.append("🚨 Bắt quả tang đường truyền trộm: Tệp nhạy cảm vừa được mở thì lập tức kết nối gửi dữ liệu ra mạng.")
         if n_sensitive > 0:
-            factors.append(f"Truy cập {n_sensitive} tệp nhạy cảm trong phân vùng tài liệu người dùng.")
+            factors.append(f"📂 Đã lén truy cập {n_sensitive} tệp tài liệu quan trọng của bạn.")
         if bytes_sent > 1024:
-            factors.append(f"Lưu lượng truyền tải lớn ra ngoài mạng ({bytes_str}).")
+            factors.append(f"📤 Phát sinh lượng dữ liệu gửi ra ngoài đáng kể: {bytes_str}.")
         if n_new_dest > 0:
-            factors.append("Địa chỉ IP đích là máy chủ mới xuất hiện lần đầu trong hệ thống.")
+            factors.append(f"🌐 Máy chủ nhận ({dest_str}) là địa chỉ lạ, chưa từng thấy trước đây.")
         if not is_signed:
-            factors.append("Tiến trình không có chữ ký số hợp lệ từ nhà phát triển tin cậy.")
+            factors.append("⚠️ Ứng dụng không có chữ ký số bảo mật từ nhà phát triển uy tín.")
 
         if not factors:
-            factors.append("Hành vi tiến trình lệch khỏi phân phối thống kê thông thường.")
+            factors.append("✅ Hoạt động của ứng dụng nằm trong phân phối bình thường, không có dấu hiệu bất thường.")
 
         # 8. Firewall suggestion command
         clean_app_name = re.sub(r"[^a-zA-Z0-9_]", "", proc_name.replace(".exe", ""))
@@ -187,8 +214,11 @@ class EvidenceExplainer:
 
         return {
             "severity": severity,
-            "headline": f"[Cảnh báo Rủi ro {severity}] Nghi vấn rò rỉ dữ liệu từ {proc_name}",
+            "headline": headline,
             "narrative": narrative,
+            "action_desc": action_desc,
+            "advice": advice,
+            "risk_pct": risk_pct,
             "proc_name": proc_name,
             "pid": pid,
             "proc_key": proc_key,
@@ -206,7 +236,7 @@ class EvidenceExplainer:
             "causal_chain": causal_chain,
             "contributing_factors": factors,
             "suggested_firewall_rule": firewall_cmd,
-            "safety_warning": "CẢNH BÁO AN TOÀN: Hệ thống không tự ý thực thi chặn. Quản trị viên cần kiểm tra kỹ trước khi áp dụng luật tường lửa Windows Firewall.",
+            "safety_warning": "CẢNH BÁO AN TOÀN: Hệ thống không tự ý thực thi chặn. Bạn có thể kiểm tra kỹ trước khi sao chép lệnh áp dụng vào Windows Firewall.",
         }
 
 

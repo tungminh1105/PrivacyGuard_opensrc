@@ -92,14 +92,14 @@ def test_explain_alert_narrative_and_structured_output():
     assert res["score"] == 0.92
     assert res["detector"] == "RuleBased"
 
-    # 2. Check narrative template requirements
+    # 2. Check storytelling narrative template requirements
     narrative = res["narrative"]
-    assert "[Cảnh báo Rủi ro Cao]" in narrative
-    assert "python.exe (PID: 8000)" in narrative
+    assert "🔴 [CẢNH BÁO NGUY HIỂM: PHÁT HIỆN GỬI TRỘM DỮ LIỆU]" in narrative
+    assert "python.exe (Mã tiến trình: 8000)" in narrative
     assert "53.0 KB" in narrative or "54321" in narrative
     assert "127.0.0.1:8765" in narrative
-    assert "Điểm bất thường: 0.92 (Mô hình: RuleBased)" in narrative
-    assert "Đường dẫn nhân quả: File -> Process -> Network Socket." in narrative
+    assert "Điểm rủi ro 92/100" in narrative
+    assert "Chặn ứng dụng này" in narrative
 
     # 3. Check privacy redaction in sensitive files and narrative
     assert "Victim" not in narrative

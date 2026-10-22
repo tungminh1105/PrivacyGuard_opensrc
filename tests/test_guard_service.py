@@ -121,9 +121,9 @@ def test_guard_service_detects_and_persists_alert(temp_guard_workspace):
     assert a["score"] >= 0.70
 
     evidence = json.loads(a["evidence"])
-    assert "[Cảnh báo Rủi ro Cao]" in evidence["narrative"]
+    assert "CẢNH BÁO NGUY HIỂM" in evidence["narrative"]
     assert "data_harvester.exe" in evidence["narrative"]
-    assert "(PID: 6789)" in evidence["narrative"]
+    assert "(Mã tiến trình: 6789)" in evidence["narrative"]
     assert evidence["has_causal_flow"] is True
     assert "payroll_database.xlsx" in evidence["sample_files_summary"]
 

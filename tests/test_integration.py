@@ -176,15 +176,15 @@ def test_end_to_end_exfiltration_detection_and_explanation(temp_workspace):
 
     # Verify Narrative
     narrative = explanation["narrative"]
-    assert "[Cảnh báo Rủi ro Cao]" in narrative
+    assert "CẢNH BÁO NGUY HIỂM" in narrative
     assert "suspicious_exporter.exe" in narrative
-    assert "(PID: 5432)" in narrative
+    assert "(Mã tiến trình: 5432)" in narrative
     assert "TargetUser" not in narrative, "Personal username should be redacted from narrative"
     assert "confidential_financials.xlsx" in narrative
     assert r"C:\Users\***\Documents" in explanation["sensitive_files"][0]
 
     # Verify Structured Explanation
-    assert "Cao" in explanation["headline"]
+    assert "Nguy hiểm cao" in explanation["headline"] or "Cao" in explanation["headline"]
     assert explanation["has_causal_flow"] is True
     assert len(explanation["sensitive_files"]) >= 1
     assert "198.51.100.88:443" in explanation["dest_str"]
