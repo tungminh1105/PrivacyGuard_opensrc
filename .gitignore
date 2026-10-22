@@ -20,4 +20,8 @@ data/*.db*
 data/*.csv
 data/privacyguard.db*
 FakeDocuments/
+data/FakeDocuments/
+fake_cloud/
+data/fake_cloud/
 results/
+

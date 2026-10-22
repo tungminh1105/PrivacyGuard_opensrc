@@ -74,6 +74,16 @@ CREATE TABLE IF NOT EXISTS file_zones (
   proc_key TEXT,
   ts REAL
 );
+
+CREATE TABLE IF NOT EXISTS receiver_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_utc REAL NOT NULL,
+  src_ip TEXT NOT NULL,
+  src_port INTEGER NOT NULL,
+  dest_port INTEGER NOT NULL,
+  bytes_received INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_receiver_ts ON receiver_logs(ts_utc);
 """
 
 
@@ -259,6 +269,33 @@ class EventStore:
         cur = self.conn.cursor()
         cur.execute("SELECT * FROM file_zones")
         return [dict(row) for row in cur.fetchall()]
+
+    def log_receiver_bytes(
+        self, ts_utc: float, src_ip: str, src_port: int, dest_port: int, bytes_received: int
+    ) -> None:
+        """Record received network bytes and UTC timestamp into receiver_logs without payload."""
+        sql = """
+        INSERT INTO receiver_logs (ts_utc, src_ip, src_port, dest_port, bytes_received)
+        VALUES (?, ?, ?, ?, ?)
+        """
+        with self.conn:
+            self.conn.execute(sql, (float(ts_utc), str(src_ip), int(src_port), int(dest_port), int(bytes_received)))
+
+    def get_receiver_logs(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Retrieve recorded receiver logs ordered by id ASC."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM receiver_logs ORDER BY id ASC LIMIT ? OFFSET ?", (limit, offset))
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_total_receiver_bytes(self, dest_port: Optional[int] = None) -> int:
+        """Calculate total bytes received across all logged connections."""
+        cur = self.conn.cursor()
+        if dest_port is not None:
+            cur.execute("SELECT COALESCE(SUM(bytes_received), 0) FROM receiver_logs WHERE dest_port = ?", (int(dest_port),))
+        else:
+            cur.execute("SELECT COALESCE(SUM(bytes_received), 0) FROM receiver_logs")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
 
     def close(self) -> None:
         """Close database connection."""

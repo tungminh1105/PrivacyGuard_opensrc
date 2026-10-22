@@ -53,3 +53,21 @@ This document outlines key limitations of the current telemetry and detection ar
 - **Limitation & Hypothesis**: The current list of `tag_patterns` in `config.yaml` is an operational heuristic/assumption that requires empirical validation during Phase D (Modeling & Anomaly Detection).
 - **Risk of Mislabeling**: Genuine application telemetry (such as Anthropic Claude's `sentry\scope_v3.json` and `sentry\session.json`, or embedded web engines like `msedgewebview2` in Office Hub) routinely writes to and reads from these directory patterns. Tagging these locations as noise candidates may lead downstream feature extraction or detection models to misidentify legitimate application behavior as benign noise, potentially masking data flows if not properly calibrated during Phase D.
 
+---
+
+## 7. Simulator Scenarios with Only Network Signals (Absence of File Read Telemetry)
+Because Sysmon lacks a `file_read` event provider (as detailed in Limitation 1), the collector cannot observe processes reading sensitive files from `FakeDocuments`. Consequently, several simulation scenarios exhibit **only network signals** in the captured telemetry, without correlated file read events:
+
+- **Scenario 1 (Bulk Exfiltration)**: Reads multiple files and transmits in a single batch. In Sysmon, only the resulting `net_connect` (Event 3) is recorded; all preceding file read actions are completely invisible.
+- **Scenario 2 (Slow Trickle Exfiltration)**: Reads files and transmits small chunks over time. Emits only a temporal sequence of `net_connect` events without file telemetry.
+- **Scenario 5 (Port 443 Exfiltration)**: Reads files and transmits to destination port 443. Sysmon logs only `net_connect` (Event 3) to port 443, identical in telemetry pattern to non-sensitive web traffic.
+- **Scenario 6 (Periodic Beaconing)**: Reads a small file and sends periodic heartbeats. Appears purely as periodic `net_connect` bursts.
+- **Scenario 8 (Network-Only Control)**: Generates random bytes in memory and transmits without touching any file on disk. Emits only `net_connect` (Event 3). Because file reads are invisible, Scenario 8 produces an almost indistinguishable telemetry footprint to Scenarios 1, 2, 5, and 6.
+
+### Contrast with Other Scenarios:
+- **Scenario 3 (Compressed Archive)**: If the compressed archive is generated in-memory, it exhibits only network signals. If written to disk as a temporary archive, Sysmon records a `file_create` (Event 11) for the `.zip` file followed by `net_connect`.
+- **Scenario 4 (Subprocess Exfiltration)**: Spawns a child process, producing a `proc_start` (Event 1) parent-child lineage followed by `net_connect` (Event 3) from the child.
+- **Scenario 7 (Benign Cloud Backup)**: Copies files to `data/fake_cloud`, creating `file_create` (Event 11) events for the destination files, with zero network connections.
+- **Scenario 9 (File-Read-Only Control)**: Only reads files without network activity. Because Sysmon does not log file reads, Scenario 9 produces **zero** file events and **zero** network events.
+
+

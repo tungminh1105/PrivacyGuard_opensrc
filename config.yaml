@@ -72,3 +72,12 @@ noise_filters:
   ignore_processes:
     - "privacyguard"
     - "python.exe"
+
+simulator:
+  receiver_host: "127.0.0.1"
+  receiver_port: 8765
+  scenario5_port: 443
+  fake_docs_dir: "data/FakeDocuments"
+  fake_cloud_dir: "data/fake_cloud"
+  ground_truth_path: "data/ground_truth.csv"
+
