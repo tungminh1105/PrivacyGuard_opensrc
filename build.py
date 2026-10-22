@@ -52,8 +52,25 @@ def run_pyinstaller_build(onefile: bool = True, clean: bool = True) -> int:
         "win32api",
         "--hidden-import",
         "win32con",
+        "--hidden-import",
+        "pystray",
+        "--hidden-import",
+        "PIL",
+        "--hidden-import",
+        "PIL.Image",
+        "--hidden-import",
+        "PIL.ImageDraw",
+        "--hidden-import",
+        "winotify",
         "--console",
     ]
+
+    assets_dir = os.path.join(project_root, "assets")
+    if os.path.exists(assets_dir):
+        cmd.extend(["--add-data", f"assets{os.pathsep}assets"])
+        icon_ico = os.path.join(assets_dir, "icon.ico")
+        if os.path.exists(icon_ico):
+            cmd.extend(["--icon", icon_ico])
 
     if onefile:
         cmd.append("--onefile")
@@ -76,9 +93,11 @@ def run_pyinstaller_build(onefile: bool = True, clean: bool = True) -> int:
         print(f"[+] Build successful! Output located in: {dist_path}")
         if onefile:
             exe_file = os.path.join(dist_path, "privacyguard.exe")
-            if os.path.exists(exe_file):
-                size_mb = os.path.getsize(exe_file) / (1024 * 1024)
-                print(f"[+] Standalone binary: {exe_file} ({size_mb:.2f} MB)")
+        else:
+            exe_file = os.path.join(dist_path, "privacyguard", "privacyguard.exe")
+        if os.path.exists(exe_file):
+            size_mb = os.path.getsize(exe_file) / (1024 * 1024)
+            print(f"[+] Standalone binary: {exe_file} ({size_mb:.2f} MB)")
         print("=" * 60 + "\n")
     else:
         print(f"\n[-] PyInstaller failed with exit code {res.returncode}")
@@ -88,11 +107,14 @@ def run_pyinstaller_build(onefile: bool = True, clean: bool = True) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description="PrivacyGuard Packaging Script")
-    parser.add_argument("--onedir", action="store_true", help="Build as directory instead of single file")
+    parser.add_argument("--onefile", action="store_true", help="Build as single file executable")
+    parser.add_argument("--onedir", action="store_true", default=False, help="Build as directory (default)")
     parser.add_argument("--no-clean", action="store_true", help="Do not clean build/dist folders before building")
     args = parser.parse_args()
 
-    ret = run_pyinstaller_build(onefile=not args.onedir, clean=not args.no_clean)
+    # Default to onedir for fast commercial distribution unless --onefile is explicitly requested
+    is_onefile = args.onefile
+    ret = run_pyinstaller_build(onefile=is_onefile, clean=not args.no_clean)
     sys.exit(ret)
 
 

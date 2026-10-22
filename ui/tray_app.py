@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -24,14 +25,57 @@ from PIL import Image, ImageDraw
 import pystray
 from pystray import Menu, MenuItem
 
-# Ensure project root is in sys.path
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Ensure project root is in sys.path across source and frozen environments
+def find_project_root() -> str:
+    """Resolve the true project root directory containing .venv and ui/app.py.
+
+    Handles both source development and PyInstaller frozen executable environments
+    (both --onedir in dist/privacyguard/ and --onefile in dist/).
+    """
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+
+        # Check current dir, parent dir, grandparent dir for markers
+        candidate = exe_dir
+        for _ in range(4):
+            if (
+                os.path.exists(os.path.join(candidate, "ui", "app.py"))
+                and os.path.exists(os.path.join(candidate, ".venv"))
+            ):
+                return candidate
+            parent = os.path.dirname(candidate)
+            if parent == candidate:
+                break
+            candidate = parent
+
+        # Fallback if parent is "dist", climb 1 more level (dist/privacyguard -> project root)
+        parent_dir = os.path.dirname(exe_dir)
+        if os.path.basename(parent_dir).lower() == "dist":
+            return os.path.dirname(parent_dir)
+        # If current folder is "dist" (e.g. dist/privacyguard.exe)
+        if os.path.basename(exe_dir).lower() == "dist":
+            return parent_dir
+
+        return exe_dir
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+PROJECT_ROOT = find_project_root()
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from core.guard_service import RealtimeGuardService
 
 logger = logging.getLogger(__name__)
+
+
+def is_port_listening(host: str = "127.0.0.1", port: int = 8501, timeout: float = 0.3) -> bool:
+    """Check if a network socket port is currently listening and accepting connections."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, ConnectionRefusedError):
+        return False
 
 
 def get_asset_path(filename: str) -> Optional[str]:
@@ -61,12 +105,12 @@ def get_asset_path(filename: str) -> Optional[str]:
 
 
 def get_python_executable() -> str:
-    """Find appropriate python interpreter whether running in venv or frozen mode."""
-    if not getattr(sys, "frozen", False) and "python" in os.path.basename(sys.executable).lower():
-        return sys.executable
-    venv_py = os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe")
+    """Find appropriate python interpreter, prioritizing project .venv in PROJECT_ROOT."""
+    venv_py = os.path.abspath(os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe"))
     if os.path.exists(venv_py):
         return venv_py
+    if not getattr(sys, "frozen", False) and "python" in os.path.basename(sys.executable).lower():
+        return sys.executable
     sys_py = shutil.which("python")
     return sys_py or "python"
 
@@ -160,11 +204,17 @@ class PrivacyGuardTrayApp:
     def open_dashboard(self, icon: Optional[pystray.Icon] = None, item: Optional[MenuItem] = None) -> None:
         """Launch Streamlit web dashboard in background and open default browser."""
         url = f"http://localhost:{self.dashboard_port}"
-        app_script = os.path.join(PROJECT_ROOT, "ui", "app.py")
+        app_script = os.path.abspath(os.path.join(PROJECT_ROOT, "ui", "app.py"))
         py_exe = get_python_executable()
 
-        # Start Streamlit if not already running
-        if self._streamlit_proc is None or self._streamlit_proc.poll() is not None:
+        if not os.path.exists(app_script):
+            logger.error("Streamlit app script not found: %s", app_script)
+
+        # Check if port is already active
+        already_listening = is_port_listening("127.0.0.1", self.dashboard_port, timeout=0.2)
+
+        # Start Streamlit if not already listening and process is not running
+        if not already_listening and (self._streamlit_proc is None or self._streamlit_proc.poll() is not None):
             cmd = [
                 py_exe,
                 "-m",
@@ -178,17 +228,48 @@ class PrivacyGuardTrayApp:
                 "--browser.serverAddress",
                 "localhost",
             ]
+            log_path = os.path.join(PROJECT_ROOT, "data", "streamlit_daemon.log")
             try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                log_file = open(log_path, "a", encoding="utf-8")
                 self._streamlit_proc = subprocess.Popen(
                     cmd,
                     cwd=PROJECT_ROOT,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
                 )
-                logger.info("Launched Streamlit Dashboard daemon (PID: %s)", self._streamlit_proc.pid)
-                time.sleep(1.5)
+                logger.info(
+                    "Launched Streamlit Dashboard daemon (PID: %s, Executable: %s, Log: %s)",
+                    self._streamlit_proc.pid,
+                    py_exe,
+                    log_path,
+                )
             except Exception as e:
-                logger.error("Failed to start Streamlit: %s", e)
+                logger.error("Failed to start Streamlit process: %s", e)
+                print(f"[-] Error launching Streamlit dashboard: {e}")
+
+        # Wait for Streamlit server to bind port and accept connections (up to 8 seconds)
+        max_wait_sec = 8.0
+        start_wait = time.time()
+        port_open = False
+        while time.time() - start_wait < max_wait_sec:
+            if is_port_listening("127.0.0.1", self.dashboard_port, timeout=0.3):
+                port_open = True
+                break
+            if self._streamlit_proc is not None and self._streamlit_proc.poll() is not None:
+                exit_code = self._streamlit_proc.poll()
+                log_path = os.path.join(PROJECT_ROOT, "data", "streamlit_daemon.log")
+                logger.error("Streamlit terminated prematurely with exit code %s. Check %s", exit_code, log_path)
+                print(f"[-] Streamlit exited unexpectedly with code {exit_code}. Check {log_path}")
+                break
+            time.sleep(0.4)
+
+        if not port_open:
+            logger.warning(
+                "Port %d not confirmed listening after %.1fs. Opening browser anyway...",
+                self.dashboard_port,
+                time.time() - start_wait,
+            )
 
         # Open browser
         webbrowser.open(url)
@@ -219,8 +300,12 @@ class PrivacyGuardTrayApp:
         if self._streamlit_proc is not None:
             try:
                 self._streamlit_proc.terminate()
+                self._streamlit_proc.wait(timeout=2.0)
             except Exception:
-                pass
+                try:
+                    self._streamlit_proc.kill()
+                except Exception:
+                    pass
 
         icon.stop()
 

@@ -161,3 +161,38 @@ def test_shield_icon_generator():
     assert isinstance(img, Image.Image)
     assert img.size == (64, 64)
     assert img.mode == "RGBA"
+
+
+def test_tray_app_root_and_python_resolution(monkeypatch):
+    """Verify find_project_root and get_python_executable resolve project paths."""
+    from ui.tray_app import find_project_root, get_python_executable, is_port_listening
+
+    # Test running in current source tree
+    root = find_project_root()
+    assert os.path.exists(os.path.join(root, "config.yaml"))
+    assert os.path.exists(os.path.join(root, "ui", "app.py"))
+
+    # Test simulated PyInstaller frozen environment in dist/privacyguard/privacyguard.exe
+    fake_exe = os.path.join(root, "dist", "privacyguard", "privacyguard.exe")
+    monkeypatch.setattr("sys.frozen", True, raising=False)
+    monkeypatch.setattr("sys.executable", fake_exe)
+
+    frozen_root = find_project_root()
+    assert os.path.samefile(frozen_root, root)
+
+    # Test simulated single-file PyInstaller frozen environment in dist/privacyguard.exe
+    fake_onefile = os.path.join(root, "dist", "privacyguard.exe")
+    monkeypatch.setattr("sys.executable", fake_onefile)
+    onefile_root = find_project_root()
+    assert os.path.samefile(onefile_root, root)
+
+    # Test get_python_executable prioritizing .venv
+    py_exe = get_python_executable()
+    assert os.path.exists(py_exe)
+    assert "python" in os.path.basename(py_exe).lower()
+    if os.path.exists(os.path.join(root, ".venv", "Scripts", "python.exe")):
+        assert ".venv" in py_exe
+
+    # Test is_port_listening returns boolean without crashing
+    closed_check = is_port_listening("127.0.0.1", 59999, timeout=0.1)
+    assert isinstance(closed_check, bool)
