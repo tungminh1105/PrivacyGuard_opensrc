@@ -401,6 +401,8 @@ class RealtimeGuardService:
 
         # Mock structured explanation
         explanation = {
+            "severity": "Cao",
+            "risk_level": "Cao",
             "headline": f"🔴 [CẢNH BÁO MẪU: KIỂM TRA HỆ THỐNG] Tiến trình {proc_name} (PID: {pid}) gửi dữ liệu nhạy cảm ra ngoài",
             "narrative": (
                 f"🔴 [CẢNH BÁO NGUY HIỂM: PHÁT HIỆN GỬI TRỘM DỮ LIỆU (BẢN MẪU KIỂM THỬ)]\n"

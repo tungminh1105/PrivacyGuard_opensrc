@@ -239,15 +239,33 @@ def load_all_alerts(
             for r in cur.fetchall():
                 try:
                     ev = json.loads(r[6]) if r[6] else {}
+                    sev = r[4] if r[4] else ev.get("severity", ev.get("risk_level", "Cao"))
+                    score_val = float(r[5]) if r[5] is not None else float(ev.get("score", 0.95))
+                    det = r[3] if r[3] else ev.get("detector", "RuleBased")
+
+                    ev["severity"] = sev
+                    ev["risk_level"] = sev
+                    ev["score"] = score_val
+                    ev["detector"] = det
+                    ev["dest_str"] = ev.get("dest_str", "127.0.0.1:8765")
+                    ev["sensitive_files"] = ev.get("sensitive_files", [])
+                    ev["proc_name"] = ev.get("proc_name", "python.exe")
+                    ev["pid"] = ev.get("pid", 8888)
+                    ev["bytes_sent"] = ev.get("bytes_sent", 0)
+                    ev["bytes_formatted"] = ev.get("bytes_formatted", format_bytes_human(ev.get("bytes_sent", 0)))
+                    ev["sample_files_summary"] = ev.get("sample_files_summary", "Tài liệu bảo mật")
+                    ev["has_causal_flow"] = ev.get("has_causal_flow", True)
+                    ev["causal_chain"] = ev.get("causal_chain", [])
+                    ev["country_or_domain"] = ev.get("country_or_domain", "Localhost / Unknown")
                     ev["timestamp"] = datetime.fromtimestamp(r[1]).strftime("%Y-%m-%d %H:%M:%S")
-                    ev["scenario_name"] = "Giám sát thời gian thực (Real-time Guard)"
-                    ev["scenario_id"] = 0
-                    ev["true_label"] = 1 if r[4] == "Cao" else 0
+                    ev["scenario_name"] = ev.get("scenario_name", "Giám sát thời gian thực (Real-time Guard)")
+                    ev["scenario_id"] = ev.get("scenario_id", 0)
+                    ev["true_label"] = 1 if sev == "Cao" else 0
                     alerts.append(ev)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    logger.debug("Failed parsing alert row: %s", e)
+        except Exception as e:
+            logger.debug("Failed reading alerts table: %s", e)
 
     # 2. Load ground truth scenario runs
     if os.path.exists(gt_path):
@@ -326,6 +344,12 @@ def load_all_alerts(
                 score=score,
                 proc_info=proc_info,
             )
+            sev_gt = explanation.get("severity", "Cao" if label == 1 else "Thấp")
+            explanation["severity"] = sev_gt
+            explanation["risk_level"] = sev_gt
+            explanation["score"] = float(explanation.get("score", score))
+            explanation["dest_str"] = explanation.get("dest_str", f"{dest_ip}:{dest_port}")
+            explanation["sensitive_files"] = explanation.get("sensitive_files", files)
             explanation["timestamp"] = row.get("t_start_utc", "")
             explanation["scenario_id"] = sc_id
             explanation["scenario_name"] = SCENARIO_NAMES.get(sc_id, f"Kịch bản {sc_id}")
@@ -343,8 +367,13 @@ def build_scenario_provenance_graph(alert: Dict[str, Any]) -> nx.DiGraph:
     """Build a representative NetworkX DiGraph for the selected alert."""
     G = nx.DiGraph()
 
-    p_node = f"proc:{alert['proc_name']} (PID: {alert['pid']})"
-    G.add_node(p_node, type="Process", label=f"{alert['proc_name']}\nPID: {alert['pid']}")
+    proc_name = alert.get("proc_name", "python.exe")
+    pid = alert.get("pid", 8888)
+    dest_str = alert.get("dest_str", "127.0.0.1:8765")
+    bytes_sent = alert.get("bytes_sent", 0)
+
+    p_node = f"proc:{proc_name} (PID: {pid})"
+    G.add_node(p_node, type="Process", label=f"{proc_name}\nPID: {pid}")
 
     # Files (Tệp cá nhân của bạn)
     files = alert.get("sensitive_files") or [r"D:\KERNAL PROTECT\privacyguard\data\FakeDocuments\hop_dong_kinh_te.docx"]
@@ -355,9 +384,9 @@ def build_scenario_provenance_graph(alert: Dict[str, Any]) -> nx.DiGraph:
         G.add_edge(f_node, p_node, relation="MỞ/ĐỌC TỆP")
 
     # Socket (Máy chủ ngoài mạng)
-    s_node = f"socket:{alert['dest_str']}"
-    G.add_node(s_node, type="Socket", label=alert["dest_str"], bytes=alert["bytes_sent"])
-    G.add_edge(p_node, s_node, relation="GỬI RA MẠNG", bytes=alert["bytes_sent"])
+    s_node = f"socket:{dest_str}"
+    G.add_node(s_node, type="Socket", label=dest_str, bytes=bytes_sent)
+    G.add_edge(p_node, s_node, relation="GỬI RA MẠNG", bytes=bytes_sent)
 
     # Causal flow edge directly linking file to socket if exfiltration occurred
     if alert.get("has_causal_flow"):
@@ -389,9 +418,9 @@ tab1, tab2, tab3, tab4 = st.tabs([
 db_stats = load_db_statistics()
 all_alerts = load_all_alerts()
 
-high_count = sum(1 for a in all_alerts if a["severity"] == "Cao")
-med_count = sum(1 for a in all_alerts if a["severity"] == "Trung bình")
-low_count = sum(1 for a in all_alerts if a["severity"] == "Thấp")
+high_count = sum(1 for a in all_alerts if a.get("severity", a.get("risk_level", "")) == "Cao")
+med_count = sum(1 for a in all_alerts if a.get("severity", a.get("risk_level", "")) == "Trung bình")
+low_count = sum(1 for a in all_alerts if a.get("severity", a.get("risk_level", "")) == "Thấp")
 
 all_files = set(f for a in all_alerts for f in a.get("sensitive_files", []))
 all_ips = set(a.get("dest_str", "").split(":")[0] for a in all_alerts if a.get("dest_str"))
@@ -466,32 +495,36 @@ with tab1:
             # Aggregate by process name
             proc_dict: Dict[str, Dict[str, Any]] = {}
             for a in all_alerts:
-                p = a["proc_name"]
+                p = a.get("proc_name", "unknown.exe")
+                sev = a.get("severity", a.get("risk_level", "Cao"))
+                sc = float(a.get("score", 0.0))
+                bytes_sent = int(a.get("bytes_sent", 0))
                 if p not in proc_dict:
                     proc_dict[p] = {
                         "proc_name": p,
-                        "pid": a["pid"],
+                        "pid": a.get("pid", 0),
                         "alert_count": 0,
                         "bytes_sent": 0,
                         "max_score": 0.0,
-                        "dest": a["dest_str"],
-                        "severity": a["severity"],
+                        "dest": a.get("dest_str", "127.0.0.1:8765"),
+                        "severity": sev,
                     }
                 proc_dict[p]["alert_count"] += 1
-                proc_dict[p]["bytes_sent"] += a["bytes_sent"]
-                if a["score"] > proc_dict[p]["max_score"]:
-                    proc_dict[p]["max_score"] = a["score"]
-                    proc_dict[p]["severity"] = a["severity"]
+                proc_dict[p]["bytes_sent"] += bytes_sent
+                if sc > proc_dict[p]["max_score"]:
+                    proc_dict[p]["max_score"] = sc
+                    proc_dict[p]["severity"] = sev
 
-            top_procs = sorted(proc_dict.values(), key=lambda x: x["max_score"], reverse=True)
+            top_procs = sorted(proc_dict.values(), key=lambda x: x.get("max_score", 0.0), reverse=True)
 
             table_rows = []
             for item in top_procs[:6]:
-                score_pct = int(round(item["max_score"] * 100))
-                if item["severity"] == "Cao":
+                score_pct = int(round(item.get("max_score", 0.0) * 100))
+                item_sev = item.get("severity", "Cao")
+                if item_sev == "Cao":
                     level_badge = f'<span class="badge-danger">🔴 Rất nguy hiểm ({score_pct}%)</span>'
                     action_tip = "🛑 Cần khóa mạng ngay"
-                elif item["severity"] == "Trung bình":
+                elif item_sev == "Trung bình":
                     level_badge = f'<span class="badge-warning">🟡 Đáng ngờ ({score_pct}%)</span>'
                     action_tip = "👀 Cần theo dõi"
                 else:
@@ -499,9 +532,9 @@ with tab1:
                     action_tip = "✅ Bình thường"
 
                 table_rows.append({
-                    "Ứng Dụng": f"**{item['proc_name']}** (PID: {item['pid']})",
-                    "Số Lần Bị Bắt": f"{item['alert_count']} lần",
-                    "Dữ Liệu Đã Gửi": format_bytes_human(item["bytes_sent"]),
+                    "Ứng Dụng": f"**{item.get('proc_name', 'unknown')}** (PID: {item.get('pid', 'N/A')})",
+                    "Số Lần Bị Bắt": f"{item.get('alert_count', 0)} lần",
+                    "Dữ Liệu Đã Gửi": format_bytes_human(item.get("bytes_sent", 0)),
                     "Mức Độ Nguy Hiểm": level_badge,
                     "Khuyên Nghị": action_tip,
                 })
@@ -516,18 +549,24 @@ with tab1:
         st.caption("Các cảnh báo rò rỉ dữ liệu vừa được hệ thống tự động ghi nhận:")
 
         if all_alerts:
-            recent_alerts = [a for a in all_alerts if a["severity"] == "Cao"][-4:]
+            recent_alerts = [a for a in all_alerts if a.get("severity", a.get("risk_level", "")) == "Cao"][-4:]
             if not recent_alerts:
                 recent_alerts = all_alerts[-4:]
 
             for alt in reversed(recent_alerts):
+                p_name = alt.get("proc_name", "unknown.exe")
+                p_pid = alt.get("pid", "N/A")
+                sc_name = alt.get("scenario_name", "Phát hiện rò rỉ")
+                f_summary = alt.get("sample_files_summary", "Tài liệu bảo mật")
+                b_fmt = alt.get("bytes_formatted", format_bytes_human(alt.get("bytes_sent", 0)))
+                d_str = alt.get("dest_str", "127.0.0.1:8765")
                 st.markdown(
                     f"""
                     <div class="story-card-danger">
-                        <b>🔴 BẮT QUẢ TANG: {alt['proc_name']} (Mã tiến trình: {alt['pid']})</b><br>
-                        <span style="color:#CBD5E1; font-size:0.88rem;">{alt.get('timestamp', 'Vừa xong')} - {alt['scenario_name']}</span><br>
+                        <b>🔴 BẮT QUẢ TANG: {p_name} (Mã tiến trình: {p_pid})</b><br>
+                        <span style="color:#CBD5E1; font-size:0.88rem;">{alt.get('timestamp', 'Vừa xong')} - {sc_name}</span><br>
                         <p style="margin:6px 0 0 0; color:#FCA5A5;">
-                            Đã mở tệp <b>{alt['sample_files_summary']}</b> và gửi <b>{alt['bytes_formatted']}</b> ra máy chủ <code>{alt['dest_str']}</code>.
+                            Đã mở tệp <b>{f_summary}</b> và gửi <b>{b_fmt}</b> ra máy chủ <code>{d_str}</code>.
                         </p>
                     </div>
                     """,
@@ -554,18 +593,18 @@ with tab2:
 
     filtered_alerts = all_alerts
     if severity_filter == "🔴 Nguy hiểm cao":
-        filtered_alerts = [a for a in filtered_alerts if a["severity"] == "Cao"]
+        filtered_alerts = [a for a in filtered_alerts if a.get("severity", a.get("risk_level", "")) == "Cao"]
     elif severity_filter == "🟡 Đáng ngờ":
-        filtered_alerts = [a for a in filtered_alerts if a["severity"] == "Trung bình"]
+        filtered_alerts = [a for a in filtered_alerts if a.get("severity", a.get("risk_level", "")) == "Trung bình"]
     elif severity_filter == "🟢 Bình thường":
-        filtered_alerts = [a for a in filtered_alerts if a["severity"] == "Thấp"]
+        filtered_alerts = [a for a in filtered_alerts if a.get("severity", a.get("risk_level", "")) == "Thấp"]
 
     if search_query:
         q = search_query.lower()
         filtered_alerts = [
             a for a in filtered_alerts
-            if q in a["proc_name"].lower()
-            or q in a["dest_str"].lower()
+            if q in a.get("proc_name", "").lower()
+            or q in a.get("dest_str", "").lower()
             or any(q in f.lower() for f in a.get("sensitive_files", []))
             or q in a.get("scenario_name", "").lower()
         ]
@@ -573,7 +612,7 @@ with tab2:
     st.write(f"Tìm thấy **{len(filtered_alerts)}** vụ việc phù hợp:")
 
     for idx, alt in enumerate(filtered_alerts[:15]):
-        sev = alt["severity"]
+        sev = alt.get("severity", alt.get("risk_level", "Cao"))
         if sev == "Cao":
             badge_icon = "🔴 NGUY HIỂM CAO"
             card_class = "story-card-danger"
@@ -584,20 +623,25 @@ with tab2:
             badge_icon = "🟢 BÌNH THƯỜNG"
             card_class = "story-card-safe"
 
-        exp_title = f"[{badge_icon}] {alt['proc_name']} (Mã tiến trình: {alt['pid']}) - {alt['scenario_name']} ({alt.get('timestamp', 'Vừa xong')})"
+        p_name = alt.get("proc_name", "unknown.exe")
+        p_pid = alt.get("pid", "N/A")
+        sc_name = alt.get("scenario_name", "Cảnh báo")
+        narrative_text = alt.get("narrative", alt.get("headline", "Phát hiện hành vi gửi dữ liệu ra ngoài."))
+
+        exp_title = f"[{badge_icon}] {p_name} (Mã tiến trình: {p_pid}) - {sc_name} ({alt.get('timestamp', 'Vừa xong')})"
 
         with st.expander(exp_title, expanded=(idx == 0)):
             # 1. Storytelling narrative box
             st.markdown("#### 📖 Chuyện Gì Đã Xảy Ra?")
-            st.markdown(f'<div class="{card_class}">{alt["narrative"].replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="{card_class}">{narrative_text.replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
 
             col_detail_1, col_detail_2 = st.columns([1.1, 0.9])
 
             with col_detail_1:
                 st.markdown("#### 🔗 Sơ Đồ Đường Đi Của Dữ Liệu")
-                if alt["has_causal_flow"]:
+                if alt.get("has_causal_flow"):
                     st.success("✅ **Đã bắt quả tang luồng truyền trộm dữ liệu:**")
-                    for step_i, step_text in enumerate(alt["causal_chain"], 1):
+                    for step_i, step_text in enumerate(alt.get("causal_chain", []), 1):
                         st.markdown(f"**Bước {step_i}:** {step_text}")
                 else:
                     st.info("ℹ️ Không phát hiện đường truyền nhân quả trực tiếp giữa tệp và cổng mạng.")
@@ -609,15 +653,20 @@ with tab2:
             with col_detail_2:
                 st.markdown("#### 📂 Các Tệp Cá Nhân Bị Truy Cập (Đã che tên bạn)")
                 if alt.get("sensitive_files"):
-                    for f in alt["sensitive_files"]:
+                    for f in alt.get("sensitive_files", []):
                         st.code(f, language="bash")
                 else:
                     st.caption("Không ghi nhận tệp cá nhân nào bị mở.")
 
                 st.markdown("#### 🌐 Thông Tin Máy Chủ Nhận Dữ Liệu")
-                st.write(f"- **Địa chỉ máy chủ:** `{alt['dest_str']}` ({alt['country_or_domain']})")
-                st.write(f"- **Dung lượng đã gửi:** **{alt['bytes_formatted']}**")
-                st.write(f"- **Đánh giá rủi ro của AI:** `{alt.get('risk_pct', int(alt['score']*100))}/100`")
+                d_str = alt.get("dest_str", "127.0.0.1:8765")
+                c_domain = alt.get("country_or_domain", "Unknown")
+                b_fmt = alt.get("bytes_formatted", format_bytes_human(alt.get("bytes_sent", 0)))
+                risk_pct = alt.get("risk_pct", int(float(alt.get("score", 0.95)) * 100))
+
+                st.write(f"- **Địa chỉ máy chủ:** `{d_str}` ({c_domain})")
+                st.write(f"- **Dung lượng đã gửi:** **{b_fmt}**")
+                st.write(f"- **Đánh giá rủi ro của AI:** `{risk_pct}/100`")
 
             # Emergency Action Section
             st.markdown("---")
@@ -631,7 +680,8 @@ with tab2:
 
             if st.session_state.get(f"show_cmd_{idx}"):
                 st.success("✅ **Đã tạo lệnh chặn an toàn! Hãy copy dòng này dán vào CMD Administrator để khóa vĩnh viễn ứng dụng:**")
-                st.code(alt["suggested_firewall_rule"], language="powershell")
+                firewall_cmd = alt.get("suggested_firewall_rule") or f'netsh advfirewall firewall add rule name="PrivacyGuard Block {p_name}" dir=out action=block program="C:\\Windows\\System32\\{p_name}"'
+                st.code(firewall_cmd, language="powershell")
                 st.markdown(
                     """
                     <div class="callout-box">
@@ -671,7 +721,11 @@ with tab3:
         selected_idx = st.selectbox(
             "Chọn vụ việc cần xem sơ đồ đường đi:",
             range(min(20, len(all_alerts))),
-            format_func=lambda i: f"Vụ #{i+1}: {all_alerts[i]['scenario_name']} - {all_alerts[i]['proc_name']} ({all_alerts[i]['severity']})",
+            format_func=lambda i: (
+                f"Vụ #{i+1}: {all_alerts[i].get('scenario_name', 'Cảnh báo')} - "
+                f"{all_alerts[i].get('proc_name', 'unknown')} "
+                f"({all_alerts[i].get('severity', all_alerts[i].get('risk_level', 'Cao'))})"
+            ),
         )
         selected_alert = all_alerts[selected_idx]
 
@@ -768,7 +822,10 @@ with tab3:
             data=[edge_trace, causal_trace, node_trace],
             layout=go.Layout(
                 title=dict(
-                    text=f"<b>Sơ đồ đường đi: {selected_alert['scenario_name']}</b> (Ứng dụng: {selected_alert['proc_name']})",
+                    text=(
+                        f"<b>Sơ đồ đường đi: {selected_alert.get('scenario_name', 'Cảnh báo')}</b> "
+                        f"(Ứng dụng: {selected_alert.get('proc_name', 'unknown')})"
+                    ),
                     font=dict(size=16, color="#F8FAFC"),
                 ),
                 showlegend=True,
