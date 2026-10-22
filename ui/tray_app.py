@@ -185,6 +185,10 @@ class PrivacyGuardTrayApp:
         if self._icon:
             count = self.guard_service.alert_count
             self._icon.title = f"PrivacyGuard - Phát hiện {count} cảnh báo rủi ro!"
+            try:
+                self._icon.update_menu()
+            except Exception as e:
+                logger.debug("Failed updating tray menu on alert: %s", e)
 
     def get_status_text(self, item: MenuItem) -> str:
         """Return dynamic status text for the context menu."""
@@ -200,6 +204,10 @@ class PrivacyGuardTrayApp:
         else:
             self.guard_service.pause()
             self._icon.title = "PrivacyGuard - Đã tạm dừng bảo vệ"
+        try:
+            self._icon.update_menu()
+        except Exception:
+            pass
 
     def open_dashboard(self, icon: Optional[pystray.Icon] = None, item: Optional[MenuItem] = None) -> None:
         """Launch Streamlit web dashboard in background and open default browser."""
@@ -274,11 +282,17 @@ class PrivacyGuardTrayApp:
         # Open browser
         webbrowser.open(url)
 
-    def scan_now(self, icon: pystray.Icon, item: MenuItem) -> None:
+    def scan_now(self, icon: Optional[pystray.Icon] = None, item: Optional[MenuItem] = None) -> None:
         """Trigger an immediate manual scan in a background worker thread."""
         def _scan():
             new_alerts = self.guard_service.scan_now()
             count = self.guard_service.alert_count
+            if self._icon:
+                self._icon.title = f"PrivacyGuard - Đang bảo vệ ({count} cảnh báo)"
+                try:
+                    self._icon.update_menu()
+                except Exception:
+                    pass
             self.guard_service.notifier.notify(
                 title="[PrivacyGuard] Quét Hoàn Tất",
                 message=f"Đã quét các sự kiện gần nhất. Tổng số cảnh báo: {count} (Mới: {new_alerts}).",
@@ -288,8 +302,21 @@ class PrivacyGuardTrayApp:
         t.start()
 
     def get_alert_count_text(self, item: MenuItem) -> str:
-        """Return dynamic alert count label."""
+        """Return dynamic alert count label queried directly from SQLite."""
         count = self.guard_service.alert_count
+        try:
+            import sqlite3
+            if os.path.exists(self.db_path):
+                conn = sqlite3.connect(self.db_path, timeout=1.0)
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM alerts")
+                row = cur.fetchone()
+                if row:
+                    count = int(row[0])
+                    self.guard_service.alert_count = count
+                conn.close()
+        except Exception as e:
+            logger.debug("Failed querying alert count for tray: %s", e)
         return f"Xem số cảnh báo ({count} alerts)"
 
     def exit_app(self, icon: pystray.Icon, item: MenuItem) -> None:

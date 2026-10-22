@@ -186,8 +186,21 @@ class ScenarioRunner:
         self.seed = seed
         self.rng = random.Random(seed)
 
+    def _touch_sensitive_file(self, filename: str = "ho_so_tai_chinh_temp.xlsx") -> str:
+        """Create or update a sensitive file in FakeDocuments to emit Sysmon Event 11 (FileCreate)."""
+        temp_path = os.path.join(self.safe_docs_dir, filename)
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(b"CONFIDENTIAL FINANCIAL RECORD DATA FOR SYSMON EVENT 11\n" + self.rng.randbytes(512))
+            # Small delay so Sysmon log agent has time to register Event 11 before net_connect
+            time.sleep(0.05)
+        except Exception as e:
+            logger.debug("Failed touching sensitive file: %s", e)
+        return temp_path
+
     def scenario_1_bulk(self) -> int:
         """Scenario 1: Read multiple files, send in a single bulk transmission (Label 1)."""
+        self._touch_sensitive_file("ho_so_tai_chinh_temp.xlsx")
         files = get_fake_files(self.safe_docs_dir, count=10, rng=self.rng)
         buffer = bytearray()
         for f in files:
@@ -197,6 +210,7 @@ class ScenarioRunner:
 
     def scenario_2_slow_trickle(self) -> int:
         """Scenario 2: Slow trickle: send small chunks with delay over time (Label 1)."""
+        self._touch_sensitive_file("sao_ke_tai_khoan_temp.xlsx")
         files = get_fake_files(self.safe_docs_dir, count=5, rng=self.rng)
         buffer = bytearray()
         for f in files:
@@ -207,6 +221,7 @@ class ScenarioRunner:
 
     def scenario_3_compressed(self) -> int:
         """Scenario 3: Compress fake files into a zip archive and send (Label 1)."""
+        self._touch_sensitive_file("hop_dong_kinh_te_temp.docx")
         files = get_fake_files(self.safe_docs_dir, count=8, rng=self.rng)
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -217,6 +232,7 @@ class ScenarioRunner:
 
     def scenario_4_subprocess(self) -> int:
         """Scenario 4: Exfiltrate via a child python subprocess (Label 1)."""
+        self._touch_sensitive_file("du_lieu_nhan_su_temp.csv")
         files = get_fake_files(self.safe_docs_dir, count=5, rng=self.rng)
         buffer = bytearray()
         for f in files:
@@ -246,6 +262,7 @@ class ScenarioRunner:
 
     def scenario_5_port_443(self) -> int:
         """Scenario 5: Exfiltrate over port 443 (Label 1)."""
+        self._touch_sensitive_file("tai_khoan_ngan_hang_temp.docx")
         files = get_fake_files(self.safe_docs_dir, count=6, rng=self.rng)
         buffer = bytearray()
         for f in files:
@@ -261,6 +278,7 @@ class ScenarioRunner:
 
     def scenario_6_periodic_beacon(self) -> int:
         """Scenario 6: Periodic beaconing: small bursts over intervals (Label 1)."""
+        self._touch_sensitive_file("khoa_bi_mat_api_temp.txt")
         files = get_fake_files(self.safe_docs_dir, count=2, rng=self.rng)
         sample_data = b""
         for f in files:

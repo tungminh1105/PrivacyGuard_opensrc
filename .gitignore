@@ -32,4 +32,6 @@ results/*
 !results/*.csv
 !results/*.json
 data/pytest_tmp/
+*.log
+data/*.log
 

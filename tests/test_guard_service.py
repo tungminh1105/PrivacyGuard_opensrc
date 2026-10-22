@@ -246,3 +246,25 @@ def test_guard_service_trigger_test_alert(temp_guard_workspace):
     assert manual_res["alert_id"] == 2
     assert manual_res["score"] == 0.95
 
+
+def test_tray_app_dynamic_alert_counting(temp_guard_workspace):
+    """Verify TrayApp dynamically reads updated alert counts from SQLite."""
+    from ui.tray_app import PrivacyGuardTrayApp
+
+    db_path = temp_guard_workspace["db_path"]
+    app = PrivacyGuardTrayApp(db_path=db_path)
+
+    # Initial count should be 0
+    text_0 = app.get_alert_count_text(None)
+    assert "(0 alerts)" in text_0
+
+    # Insert test alert into DB
+    app.guard_service.trigger_test_alert(score=0.95)
+
+    # Calling get_alert_count_text dynamically queries SQLite
+    text_1 = app.get_alert_count_text(None)
+    assert "(1 alerts)" in text_1
+
+    app.guard_service.stop()
+
+

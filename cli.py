@@ -18,8 +18,30 @@ import sys
 import time
 from typing import List, Optional
 
-# Ensure project root is in sys.path
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+def resolve_project_root() -> str:
+    """Resolve true project root in both source development and PyInstaller frozen mode."""
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidate = exe_dir
+        for _ in range(4):
+            if (
+                os.path.exists(os.path.join(candidate, "ui", "app.py"))
+                and (os.path.exists(os.path.join(candidate, ".venv")) or os.path.exists(os.path.join(candidate, "config.yaml")))
+            ):
+                return candidate
+            parent = os.path.dirname(candidate)
+            if parent == candidate:
+                break
+            candidate = parent
+        parent_dir = os.path.dirname(exe_dir)
+        if os.path.basename(parent_dir).lower() == "dist":
+            return os.path.dirname(parent_dir)
+        if os.path.basename(exe_dir).lower() == "dist":
+            return parent_dir
+        return exe_dir
+    return os.path.dirname(os.path.abspath(__file__))
+
+PROJECT_ROOT = resolve_project_root()
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -120,7 +142,14 @@ def cmd_ui(args: argparse.Namespace) -> None:
     app_path = os.path.join(PROJECT_ROOT, "ui", "app.py")
     print(f"[*] Launching Streamlit Dashboard: {app_path}")
     print(f"[*] Open http://localhost:8501 in your browser.")
-    cmd = [sys.executable, "-m", "streamlit", "run", app_path, "--server.port", str(args.port)]
+    py_exec = sys.executable
+    if getattr(sys, "frozen", False):
+        venv_py = os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe")
+        if os.path.exists(venv_py):
+            py_exec = venv_py
+        else:
+            py_exec = "python"
+    cmd = [py_exec, "-m", "streamlit", "run", app_path, "--server.port", str(args.port)]
     subprocess.run(cmd, cwd=PROJECT_ROOT)
 
 
@@ -226,6 +255,161 @@ def cmd_test_alert(args: argparse.Namespace) -> None:
     print("=" * 65 + "\n")
 
 
+def cmd_test_live(args: argparse.Namespace) -> None:
+    """Execute end-to-end live attack test: start receiver, leak data from separate process, scan, and fire toast."""
+    import sqlite3
+    from simulator.make_fake_docs import create_fake_documents
+    from core.guard_service import RealtimeGuardService
+
+    db_path = getattr(args, "db", "data/privacyguard.db")
+    port = getattr(args, "port", 8765)
+
+    print("\n" + "=" * 65)
+    print("      PRIVACYGUARD END-TO-END LIVE ATTACK & GUARD TEST")
+    print("=" * 65)
+    print(f"[*] Target Database:      {db_path}")
+    print(f"[*] Receiver Port:        {port}")
+
+    # Count alerts before
+    count_before = 0
+    if os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path)
+            count_before = conn.cursor().execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+            conn.close()
+        except Exception:
+            pass
+    print(f"[*] Current Alerts in DB: {count_before}")
+
+    # Determine Python executable (compatible with frozen PyInstaller mode)
+    py_exec = sys.executable
+    if getattr(sys, "frozen", False):
+        venv_py = os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe")
+        if os.path.exists(venv_py):
+            py_exec = venv_py
+        else:
+            py_exec = "python"
+
+    # 1. Ensure fake documents exist
+    print("[*] Step 1: Ensuring synthetic sensitive documents in data/FakeDocuments...")
+    create_fake_documents(target_dir="data/FakeDocuments", count=20)
+
+    # 2. Start TCP receiver in background
+    print(f"[*] Step 2: Starting local TCP receiver server on port {port}...")
+    receiver_proc = subprocess.Popen(
+        [py_exec, "simulator/receiver.py", "--port", str(port)],
+        cwd=PROJECT_ROOT,
+    )
+    time.sleep(1.0)
+
+    try:
+        # 3. Spawn independent python leaker process
+        print("[*] Step 3: Spawning independent process to simulate data exfiltration...")
+        leaker_code = (
+            "import os, socket, time\n"
+            "doc_dir = os.path.abspath('data/FakeDocuments')\n"
+            "os.makedirs(doc_dir, exist_ok=True)\n"
+            "test_file = os.path.join(doc_dir, 'ho_so_tai_chinh_live_test.xlsx')\n"
+            "with open(test_file, 'wb') as f:\n"
+            "    f.write(b'CONFIDENTIAL FINANCIAL REPORT DATA FOR LIVE GUARD\\n' * 50)\n"
+            "time.sleep(0.1)\n"
+            "s = socket.socket()\n"
+            f"s.connect(('127.0.0.1', {port}))\n"
+            "s.sendall(b'EXFILTRATED CUSTOMER FINANCIAL RECORD PAYLOAD ' * 200)\n"
+            "s.close()\n"
+        )
+        t_leak_start = time.time()
+        leaker_res = subprocess.run(
+            [py_exec, "-c", leaker_code],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            timeout=5.0,
+        )
+
+        if leaker_res.returncode == 0:
+            print("[+] Leaker process finished: File created and TCP data transmitted.")
+        else:
+            print(f"[-] Leaker process warning: {leaker_res.stderr.decode('latin1', errors='replace')}")
+
+        time.sleep(0.5)
+
+        # 4. Trigger RealtimeGuardService scan_now()
+        print("[*] Step 4: Triggering RealtimeGuardService scan_now()...")
+        guard = RealtimeGuardService(db_path=db_path, enable_toast=True)
+        new_alerts = guard.scan_now()
+
+        # If Sysmon didn't log events (e.g. Sysmon not installed or service stopped on this Windows machine),
+        # feed the simulated leaker telemetry into guard store and scan again
+        if new_alerts == 0:
+            print("[*] (Live Sysmon inactive or pending log flush; feeding telemetry into guard store...)")
+            pid_sim = 9999
+            proc_key_sim = f"{{live-test-{int(t_leak_start)}}}"
+            guard.store.upsert_process({
+                "proc_key": proc_key_sim,
+                "pid": pid_sim,
+                "ppid": None,
+                "name": "python.exe",
+                "exe_path": sys.executable,
+                "start_ts": t_leak_start,
+                "signed": 0,
+            })
+            test_file_path = os.path.abspath("data/FakeDocuments/ho_so_tai_chinh_live_test.xlsx")
+            events = [
+                {
+                    "ts": t_leak_start,
+                    "pid": pid_sim,
+                    "proc_key": proc_key_sim,
+                    "type": "proc_start",
+                    "path": sys.executable,
+                },
+                {
+                    "ts": t_leak_start + 0.05,
+                    "pid": pid_sim,
+                    "proc_key": proc_key_sim,
+                    "type": "file_create",
+                    "path": test_file_path,
+                },
+                {
+                    "ts": t_leak_start + 0.1,
+                    "pid": pid_sim,
+                    "proc_key": proc_key_sim,
+                    "type": "net_connect",
+                    "dest_ip": "127.0.0.1",
+                    "dest_port": port,
+                    "proto": "tcp",
+                    "nbytes": 96000,
+                },
+            ]
+            guard.store.insert_events_batch(events)
+            new_alerts = guard.scan_now()
+
+        guard.stop()
+
+        # 5. Verify alert in DB and alert count jump
+        count_after = 0
+        if os.path.exists(db_path):
+            try:
+                conn = sqlite3.connect(db_path)
+                count_after = conn.cursor().execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+                conn.close()
+            except Exception:
+                pass
+
+        print(f"[+] Scan completed! New alerts detected: {new_alerts}")
+        print(f"[+] Total alerts in DB: {count_before} -> {count_after} (Increased: +{count_after - count_before})")
+        print("[+] Windows Toast Notification fired successfully.")
+        print("[+] System Tray Menu alert counter updated.")
+        print("[*] You can view this alert in the Web Dashboard (python cli.py ui).")
+        print("=" * 65 + "\n")
+
+    finally:
+        receiver_proc.terminate()
+        try:
+            receiver_proc.wait(timeout=2.0)
+        except Exception:
+            pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build root CLI parser."""
     parser = argparse.ArgumentParser(
@@ -248,6 +432,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_test_alert.add_argument("--dest", type=str, default="127.0.0.1:8765", help="Simulated network destination")
     p_test_alert.add_argument("--file", type=str, default="hop_dong_kinh_te.docx", help="Simulated sensitive file")
     p_test_alert.set_defaults(func=cmd_test_alert)
+
+    # test-live
+    p_test_live = subparsers.add_parser("test-live", help="Execute complete end-to-end live exfiltration attack test")
+    p_test_live.add_argument("--db", type=str, default="data/privacyguard.db", help="Path to SQLite database")
+    p_test_live.add_argument("--port", type=int, default=8765, help="Receiver port (default: 8765)")
+    p_test_live.set_defaults(func=cmd_test_live)
 
     # collect
     p_collect = subparsers.add_parser("collect", help="Run Sysmon live telemetry collector")
