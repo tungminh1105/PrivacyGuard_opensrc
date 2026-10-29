@@ -43,26 +43,51 @@ from core.features import (
 def test_sensitive_path_and_scoring():
     """Verify sensitive path identification and score boundaries [0.0, 1.0]."""
     # 1. High secrets (1.0)
-    assert get_sensitivity_score("C:\\Users\\User\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data") == 1.0
-    assert get_sensitivity_score("C:\\Users\\User\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cookies") == 1.0
     assert get_sensitivity_score("C:\\Users\\User\\.ssh\\id_rsa") == 1.0
     assert get_sensitivity_score("C:\\Users\\User\\.aws\\credentials") == 1.0
     assert get_sensitivity_score("C:\\app\\secret_key.pem") == 1.0
     assert get_sensitivity_score("C:\\app\\db_password.kdbx") == 1.0
 
-    # 2. Sensitive documents in user folders (0.8)
+    # 2. Excluded directories: Edge cache, Temp, pytest_tmp, Google cache => 0.0 and is_sensitive_path is False
+    edge_cache = "C:\\Users\\User\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache\\data_0"
+    edge_local_state = "C:\\Users\\User\\AppData\\Local\\Microsoft\\Edge\\User Data\\Local State"
+    temp_dir_file = "C:\\Users\\User\\AppData\\Local\\Temp\\pg_guard_test_123\\guard_test.db"
+    temp_tmp_file = "C:\\Users\\User\\AppData\\Local\\Temp\\sample.tmp"
+    pytest_tmp_file = "D:\\KERNAL PROTECT\\privacyguard\\data\\pytest_tmp\\test_doc.xlsx"
+    google_cache = "C:\\Users\\User\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache"
+
+    assert get_sensitivity_score(edge_cache) == 0.0
+    assert is_sensitive_path(edge_cache) is False
+    assert get_sensitivity_score(edge_local_state) == 0.0
+    assert is_sensitive_path(edge_local_state) is False
+    assert get_sensitivity_score(temp_dir_file) == 0.0
+    assert is_sensitive_path(temp_dir_file) is False
+    assert get_sensitivity_score(temp_tmp_file) == 0.0
+    assert is_sensitive_path(temp_tmp_file) is False
+    assert get_sensitivity_score(pytest_tmp_file) == 0.0
+    assert is_sensitive_path(pytest_tmp_file) is False
+    assert get_sensitivity_score(google_cache) == 0.0
+    assert is_sensitive_path(google_cache) is False
+
+    # 3. Sensitive documents in user folders: data/FakeDocuments/*.xlsx => True (0.8)
     assert get_sensitivity_score("D:\\KERNAL PROTECT\\privacyguard\\data\\FakeDocuments\\hop_dong_thue_nha.docx") == 0.8
+    assert get_sensitivity_score("D:\\KERNAL PROTECT\\privacyguard\\data\\FakeDocuments\\ho_so_tai_chinh.xlsx") == 0.8
+    assert is_sensitive_path("D:\\KERNAL PROTECT\\privacyguard\\data\\FakeDocuments\\ho_so_tai_chinh.xlsx") is True
+    assert is_sensitive_path("data/FakeDocuments/financial_data.xlsx") is True
+    assert is_sensitive_path("D:\\KERNAL PROTECT\\privacyguard\\data\\FakeDocuments\\hop_dong_thue_nha.docx") is True
     assert get_sensitivity_score("C:\\Users\\User\\Documents\\bang_luong_thang_10.xlsx") == 0.8
     assert get_sensitivity_score("C:\\Users\\User\\Desktop\\bao_cao_tai_chinh.pdf") == 0.8
-    assert is_sensitive_path("D:\\KERNAL PROTECT\\privacyguard\\data\\FakeDocuments\\hop_dong_thue_nha.docx") is True
 
-    # 3. Generic files in user folders (0.5)
+    # 4. Generic files in user folders (0.5)
     assert get_sensitivity_score("C:\\Users\\User\\Documents\\notes.log") == 0.5
 
-    # 4. Sensitive extensions outside user folders (0.4)
-    assert get_sensitivity_score("D:\\tools\\manual.pdf") == 0.4
+    # 5. Non-sensitive extensions/files outside user folders (0.0)
+    assert get_sensitivity_score("D:\\tools\\test.db") == 0.0
+    assert get_sensitivity_score("D:\\tools\\test.tmp") == 0.0
+    assert is_sensitive_path("D:\\tools\\test.db") is False
+    assert is_sensitive_path("D:\\tools\\test.tmp") is False
 
-    # 5. System binaries and noise (0.0)
+    # 6. System binaries and noise (0.0)
     assert get_sensitivity_score("C:\\Windows\\System32\\cmd.exe") == 0.0
     assert get_sensitivity_score("C:\\Windows\\Prefetch\\CMD.EXE-A1B2C3D4.pf") == 0.0
     assert get_sensitivity_score("C:\\pagefile.sys") == 0.0

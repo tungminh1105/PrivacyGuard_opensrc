@@ -408,11 +408,12 @@ st.markdown('<div class="main-title">🛡️ PrivacyGuard - Hệ Thống Giám S
 st.markdown('<div class="sub-title">Bảo vệ quyền riêng tư cá nhân & Phát hiện kẻ gian gửi trộm dữ liệu qua Sơ đồ đường đi dữ liệu (Data Flow Map) và Trí tuệ Nhân tạo</div>', unsafe_allow_html=True)
 
 # Tabs
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🛡️ 1. Tổng quan bảo vệ",
     "🚨 2. Nhật ký & Xử lý nguy cơ",
     "🗺️ 3. Sơ đồ đường đi của dữ liệu",
     "🧪 4. Khoa học & So sánh hiệu năng AI",
+    "🔍 5. Chẩn đoán & Phễu bảo vệ",
 ])
 
 db_stats = load_db_statistics()
@@ -1029,3 +1030,138 @@ with tab4:
             - **Autoencoder (Deep Learning):** Gặp hiện tượng **'Mù rò rỉ nhỏ giọt'** ở Kịch bản 2 ($45.8\%$) và Kịch bản 6 ($16.7\%$). Điều này chứng minh rằng trong bài toán chống thất thoát dữ liệu (DLP), biểu diễn nhân quả có ưu thế vượt trội so với các mô hình hộp đen chỉ học trên phân phối số lượng bytes.
             """
         )
+
+# ==============================================================================
+# TAB 5: CHẨN ĐOÁN & PHỄU BẢO VỆ (DIAGNOSTICS & FUNNEL)
+# ==============================================================================
+with tab5:
+    st.markdown("### 🔍 Phễu Kiểm Soát & Chẩn Đoán Dữ Liệu Thời Gian Thực")
+    st.caption("Minh bạch hóa quá trình sàng lọc: Theo dõi trực quan lưu lượng dữ liệu đi qua từng cổng kiểm soát (Hard Gates) để loại bỏ nhiễu và phát hiện rò rỉ thật.")
+
+    from core.store import EventStore
+    from core.guard_service import RealtimeGuardService
+
+    st_store = EventStore(db_path=CANONICAL_DB)
+    temp_guard = RealtimeGuardService(db_path=CANONICAL_DB, poll_sysmon=False, enable_toast=False)
+    sysmon_ok, sysmon_desc = temp_guard.check_sysmon_status()
+
+    cur = st_store.conn.cursor()
+    cur.execute("SELECT MAX(id), COUNT(*) FROM events")
+    ev_stat = cur.fetchone()
+    total_ev = ev_stat[1] or 0
+    watermark = st_store.get_last_scanned_event_id()
+
+    rx_stat = st_store.get_recent_receiver_stats(seconds=180.0)
+    rx_count = rx_stat["count"]
+    rx_bytes = rx_stat["total_bytes"]
+
+    c_d1, c_d2, c_d3, c_d4 = st.columns(4)
+    with c_d1:
+        st.markdown(
+            f"""
+            <div class="stat-card">
+                <div class="stat-icon">📡</div>
+                <div class="stat-value" style="color:{'#10B981' if sysmon_ok else '#EF4444'};">{'HOẠT ĐỘNG' if sysmon_ok else 'LỖI QUYỀN'}</div>
+                <div class="stat-label">Sysmon Driver</div>
+                <div class="stat-desc">{sysmon_desc}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c_d2:
+        st.markdown(
+            f"""
+            <div class="stat-card">
+                <div class="stat-icon">🔖</div>
+                <div class="stat-value" style="color:#3B82F6;">{watermark}</div>
+                <div class="stat-label">Event Watermark</div>
+                <div class="stat-desc">Tổng events: {total_ev} bản ghi</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c_d3:
+        st.markdown(
+            f"""
+            <div class="stat-card">
+                <div class="stat-icon">📥</div>
+                <div class="stat-value" style="color:#8B5CF6;">{rx_count} kết nối</div>
+                <div class="stat-label">Receiver Logs (3m)</div>
+                <div class="stat-desc">Đã nhận: {format_bytes_human(rx_bytes)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c_d4:
+        st.markdown(
+            f"""
+            <div class="stat-card">
+                <div class="stat-icon">🛡️</div>
+                <div class="stat-value" style="color:#10B981;">{len(all_alerts)} alerts</div>
+                <div class="stat-label">Cảnh Báo Đã Xác Lập</div>
+                <div class="stat-desc">Lưu trong cơ sở dữ liệu</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+    st.markdown("#### 1. Phễu Kiểm Soát 6 Cổng Bảo Vệ (Security Funnel)")
+    st.caption("Dữ liệu telemetry của mọi tiến trình phải vượt qua 5 cổng kiểm soát và 1 cổng đánh giá AI để trở thành cảnh báo chính thức:")
+
+    recent_stats = st_store.get_recent_scan_stats(seconds=300.0)
+    if recent_stats:
+        agg = {
+            "events_loaded": sum(s["events_loaded"] for s in recent_stats),
+            "windows_created": sum(s["windows_created"] for s in recent_stats),
+            "ignored_process": sum(s["ignored_process"] for s in recent_stats),
+            "no_causal": sum(s["no_causal"] for s in recent_stats),
+            "bytes_below_min": sum(s["bytes_below_min"] for s in recent_stats),
+            "no_sensitive_file": sum(s["no_sensitive_file"] for s in recent_stats),
+            "score_below_threshold": sum(s["score_below_threshold"] for s in recent_stats),
+            "duplicate": sum(s["duplicate"] for s in recent_stats),
+            "alerts_created": sum(s["alerts_created"] for s in recent_stats),
+        }
+    else:
+        latest_meta = st_store.get_meta("latest_scan_stats")
+        if latest_meta:
+            try:
+                agg = json.loads(latest_meta)
+            except Exception:
+                agg = {}
+        else:
+            agg = {}
+
+    funnel_data = [
+        {"Cổng Kiểm Soát": "0. Cửa Sổ Đặc Trưng Khởi Tạo", "Số Lượng": agg.get("windows_created", 0), "Ý Nghĩa & Mục Đích": "Tập hợp các cửa sổ trượt 60s có hoạt động mạng và tệp"},
+        {"Cổng Kiểm Soát": "Cổng 1: Loại bỏ Tiến trình bỏ qua", "Số Lượng": agg.get("ignored_process", 0), "Ý Nghĩa & Mục Đích": "Loại bỏ privacyguard.exe, streamlit, collector khỏi diện theo dõi"},
+        {"Cổng Kiểm Soát": "Cổng 2: Kiểm tra Luồng nhân quả (Causal)", "Số Lượng": agg.get("no_causal", 0), "Ý Nghĩa & Mục Đích": "Loại bỏ tiến trình chỉ gửi mạng độc lập không liên quan đọc file"},
+        {"Cổng Kiểm Soát": "Cổng 3: Ngưỡng dung lượng (>= 1024B)", "Số Lượng": agg.get("bytes_below_min", 0), "Ý Nghĩa & Mục Đích": "Loại bỏ kết nối rỗng, keep-alive (0 bytes) chống alert storm"},
+        {"Cổng Kiểm Soát": "Cổng 4: Chạm tệp tài liệu nhạy cảm", "Số Lượng": agg.get("no_sensitive_file", 0), "Ý Nghĩa & Mục Đích": "Loại bỏ hoạt động tải file thường, cập nhật hệ thống Windows"},
+        {"Cổng Kiểm Soát": "Cổng 5: Đánh giá Rủi ro AI (>= 70%)", "Số Lượng": agg.get("score_below_threshold", 0), "Ý Nghĩa & Mục Đích": "Mô hình đồ thị chấm điểm hành vi nguy hiểm mức cao"},
+        {"Cổng Kiểm Soát": "Cổng 6: Khử trùng lặp (Cooldown 600s)", "Số Lượng": agg.get("duplicate", 0), "Ý Nghĩa & Mục Đích": "Chặn bắn lặp cảnh báo cho cùng một hành vi trong 10 phút"},
+        {"Cổng Kiểm Soát": "🎯 CẢNH BÁO TẠO THÀNH CÔNG", "Số Lượng": agg.get("alerts_created", 0), "Ý Nghĩa & Mục Đích": "Được ghi vào DB và gửi Windows Toast Notification"},
+    ]
+    df_funnel = pd.DataFrame(funnel_data)
+    st.table(df_funnel)
+
+    st.markdown("---")
+    st.markdown("#### 2. Dữ Liệu Ghi Nhận Từ TCP Receiver Server (`receiver_logs`)")
+    cur.execute("SELECT id, datetime(ts_utc, 'unixepoch', 'localtime') as time_local, src_ip, src_port, dest_port, bytes_received FROM receiver_logs ORDER BY id DESC LIMIT 8")
+    rx_rows = [dict(r) for r in cur.fetchall()]
+    if rx_rows:
+        df_rx = pd.DataFrame(rx_rows)
+        df_rx.rename(columns={
+            "id": "ID",
+            "time_local": "Thời Gian (Local)",
+            "src_ip": "IP Nguồn",
+            "src_port": "Cổng Nguồn",
+            "dest_port": "Cổng Đích",
+            "bytes_received": "Dung Lượng Nhận (Bytes)",
+        }, inplace=True)
+        st.dataframe(df_rx, use_container_width=True, hide_index=True)
+    else:
+        st.info("Chưa có kết nối nào gửi dữ liệu tới Receiver Server.")
+
+    st_store.close()
+

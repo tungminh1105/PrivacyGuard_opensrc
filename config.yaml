@@ -74,6 +74,12 @@ noise_filters:
     - "collector"
     - "streamlit"
 
+realtime_guard:
+  min_exfil_bytes: 1024
+  alert_cooldown_sec: 600
+  lookback_sec: 120
+  max_lookback_sec: 180
+
 simulator:
   receiver_host: "127.0.0.1"
   receiver_port: 8765
@@ -83,6 +89,16 @@ simulator:
   ground_truth_path: "data/ground_truth.csv"
 
 sensitive_paths:
+  exclude_directories:
+    - "AppData\\Local\\Temp"
+    - "AppData\\Local\\Microsoft\\Edge"
+    - "AppData\\Local\\Google"
+    - "AppData\\Local\\Packages"
+    - "data\\pytest_tmp"
+    - "build"
+    - "dist"
+    - ".venv"
+    - "__pycache__"
   directories:
     - "Documents"
     - "FakeDocuments"

@@ -1,10 +1,12 @@
 """Windows System Tray Application for PrivacyGuard (Commercial Upgrade).
 
 Provides an interactive system tray icon in the Windows taskbar notifications area:
-- Real-time protection status monitoring (Running / Paused).
+- Real-time protection status monitoring (Running / Paused / Admin Required).
 - One-click launch for the Streamlit Web Dashboard.
 - Immediate manual scan trigger (Scan Now).
-- Live alert counter and notification integration.
+- Live alert counter continuously synced with canonical SQLite database.
+- Periodic 2-second background refresh to update tooltip and menu dynamic labels.
+- Startup diagnostics logged to data/privacyguard.log.
 - Graceful termination of background worker daemon.
 """
 
@@ -14,6 +16,7 @@ import logging
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -25,48 +28,31 @@ from PIL import Image, ImageDraw
 import pystray
 from pystray import Menu, MenuItem
 
-# Ensure project root is in sys.path across source and frozen environments
-def find_project_root() -> str:
-    """Resolve the true project root directory containing .venv and ui/app.py.
-
-    Handles both source development and PyInstaller frozen executable environments
-    (both --onedir in dist/privacyguard/ and --onefile in dist/).
-    """
-    if getattr(sys, "frozen", False):
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-
-        # Check current dir, parent dir, grandparent dir for markers
-        candidate = exe_dir
-        for _ in range(4):
-            if (
-                os.path.exists(os.path.join(candidate, "ui", "app.py"))
-                and os.path.exists(os.path.join(candidate, ".venv"))
-            ):
-                return candidate
-            parent = os.path.dirname(candidate)
-            if parent == candidate:
-                break
-            candidate = parent
-
-        # Fallback if parent is "dist", climb 1 more level (dist/privacyguard -> project root)
-        parent_dir = os.path.dirname(exe_dir)
-        if os.path.basename(parent_dir).lower() == "dist":
-            return os.path.dirname(parent_dir)
-        # If current folder is "dist" (e.g. dist/privacyguard.exe)
-        if os.path.basename(exe_dir).lower() == "dist":
-            return parent_dir
-
-        return exe_dir
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-PROJECT_ROOT = find_project_root()
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
+# Centralized path resolver
+from core.paths import (
+    PROJECT_ROOT,
+    get_project_root,
+    resolve_path,
+    get_default_db_path,
+    get_default_config_path,
+    cleanup_dist_stray_db,
+)
 from core.guard_service import RealtimeGuardService
 
-logger = logging.getLogger(__name__)
+find_project_root = get_project_root
+
+logger = logging.getLogger("privacyguard.tray")
+
+
+def configure_tray_logger() -> str:
+    """Configure persistent logging to data/privacyguard.log."""
+    log_path = resolve_path("data/privacyguard.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logger.addHandler(fh)
+    logger.setLevel(logging.INFO)
+    return log_path
 
 
 def is_port_listening(host: str = "127.0.0.1", port: int = 8501, timeout: float = 0.3) -> bool:
@@ -79,11 +65,7 @@ def is_port_listening(host: str = "127.0.0.1", port: int = 8501, timeout: float 
 
 
 def get_asset_path(filename: str) -> Optional[str]:
-    """Resolve asset file path across standalone executable and source environments.
-
-    Supports PyInstaller bundle directory (sys._MEIPASS), standalone exe folder,
-    and repository source directory.
-    """
+    """Resolve asset file path across standalone executable and source environments."""
     candidates = []
     # 1. PyInstaller temporary extraction folder
     if hasattr(sys, "_MEIPASS"):
@@ -125,7 +107,6 @@ def create_shield_icon_image(size: int = 64, color: tuple = (16, 185, 129)) -> I
     def pt(x, y):
         return (int(x * scale), int(y * scale))
 
-    # Shield polygon contour
     shield_pts = [
         pt(32, 4),
         pt(58, 14),
@@ -155,17 +136,52 @@ class PrivacyGuardTrayApp:
         polling_interval: float = 10.0,
         dashboard_port: int = 8501,
     ):
-        self.db_path = db_path
+        # 1. Standardize absolute paths
+        self.db_path = resolve_path(db_path)
+        self.config_path = get_default_config_path()
         self.dashboard_port = dashboard_port
+
+        # 2. Configure file logging
+        log_file = configure_tray_logger()
+
+        # 3. Clean up any empty stray database in dist/
+        cleanup_dist_stray_db()
+
+        # 4. Initialize real-time protection worker
         self.guard_service = RealtimeGuardService(
             db_path=self.db_path,
             polling_interval_sec=polling_interval,
             alert_threshold=0.70,
+            config_path=self.config_path,
             enable_toast=True,
         )
 
+        # 5. Check Sysmon availability and rights
+        is_sysmon_ok, sysmon_status = self.guard_service.check_sysmon_status()
+        self._sysmon_error: Optional[str] = None if is_sysmon_ok else sysmon_status
+
+        # 6. Read actual alert count from DB
+        initial_alerts = self.query_db_alert_count()
+        self.guard_service.alert_count = initial_alerts
+        self._last_rendered_count = initial_alerts
+
+        # 7. Write clear startup log banner
+        logger.info("==================================================")
+        logger.info("      PRIVACYGUARD SYSTEM TRAY STARTUP")
+        logger.info("==================================================")
+        logger.info("  CWD:                 %s", os.getcwd())
+        logger.info("  PROJECT_ROOT:        %s", PROJECT_ROOT)
+        logger.info("  Canonical DB path:   %s", self.db_path)
+        logger.info("  Config path:         %s", self.config_path)
+        logger.info("  Log file:            %s", log_file)
+        logger.info("  Current DB Alerts:   %d", initial_alerts)
+        logger.info("  Sysmon Status:       %s", sysmon_status)
+        logger.info("==================================================")
+
         self._streamlit_proc: Optional[subprocess.Popen] = None
         self._icon: Optional[pystray.Icon] = None
+        self._running: bool = False
+        self._refresh_thread: Optional[threading.Thread] = None
 
         # Load or generate icon image
         icon_path = get_asset_path("icon.png") or get_asset_path("icon.ico")
@@ -180,34 +196,76 @@ class PrivacyGuardTrayApp:
         # Connect callback to update icon tooltip on new alerts
         self.guard_service.add_alert_callback(self._on_alert_detected)
 
+    def query_db_alert_count(self) -> int:
+        """Query alert count directly from canonical SQLite database."""
+        try:
+            if os.path.exists(self.db_path):
+                conn = sqlite3.connect(self.db_path, timeout=1.0)
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM alerts")
+                row = cur.fetchone()
+                count = int(row[0]) if row else 0
+                conn.close()
+                return count
+        except Exception as e:
+            logger.debug("Failed querying alert count from db (%s): %s", self.db_path, e)
+        return 0
+
+    def get_alert_count_text(self, item: MenuItem) -> str:
+        """Return dynamic alert count label queried directly from SQLite (no RAM fallback)."""
+        count = self.query_db_alert_count()
+        self.guard_service.alert_count = count
+        return f"Xem số cảnh báo ({count} alerts)"
+
+    def get_status_text(self, item: MenuItem) -> str:
+        """Return dynamic status text for the context menu."""
+        if self._sysmon_error or getattr(self.guard_service, "sysmon_error", None):
+            return "Trạng thái: Lỗi quyền Admin (Chạy lại bằng Run as administrator)"
+        if self.guard_service.is_paused():
+            return "Trạng thái: Đã tạm dừng (Paused)"
+        tw = getattr(self.guard_service, "toast_warning", None)
+        if tw:
+            return "Trạng thái: Đang bảo vệ (⚠️ Toast bị chặn bởi OS, xem Dashboard)"
+        return "Trạng thái: Đang bảo vệ (Running)"
+
+    def _determine_title(self, count: int) -> str:
+        """Compute the appropriate icon title/tooltip based on current system state."""
+        if self._sysmon_error or getattr(self.guard_service, "sysmon_error", None):
+            return "PrivacyGuard - Lỗi quyền Admin - chạy lại bằng Run as administrator"
+        if self.guard_service.is_paused():
+            return "PrivacyGuard - Đã tạm dừng bảo vệ"
+        tw = getattr(self.guard_service, "toast_warning", None)
+        if tw:
+            return f"PrivacyGuard - {count} cảnh báo (Toast bị tắt bởi OS, xem Dashboard)"
+        return f"PrivacyGuard - Đang bảo vệ ({count} cảnh báo)"
+
     def _on_alert_detected(self, alert_data: dict) -> None:
         """Callback invoked whenever the guard service detects a High Risk exfiltration."""
+        count = self.query_db_alert_count()
+        self.guard_service.alert_count = count
+        self._last_rendered_count = count
         if self._icon:
-            count = self.guard_service.alert_count
             self._icon.title = f"PrivacyGuard - Phát hiện {count} cảnh báo rủi ro!"
             try:
                 self._icon.update_menu()
             except Exception as e:
                 logger.debug("Failed updating tray menu on alert: %s", e)
 
-    def get_status_text(self, item: MenuItem) -> str:
-        """Return dynamic status text for the context menu."""
-        if self.guard_service.is_paused():
-            return "Trạng thái: Đã tạm dừng (Paused)"
-        return "Trạng thái: Đang bảo vệ (Running)"
-
     def toggle_pause(self, icon: pystray.Icon, item: MenuItem) -> None:
         """Toggle protection pause/resume."""
+        count = self.query_db_alert_count()
+        self.guard_service.alert_count = count
         if self.guard_service.is_paused():
             self.guard_service.resume()
-            self._icon.title = f"PrivacyGuard - Đang bảo vệ ({self.guard_service.alert_count} cảnh báo)"
         else:
             self.guard_service.pause()
-            self._icon.title = "PrivacyGuard - Đã tạm dừng bảo vệ"
-        try:
-            self._icon.update_menu()
-        except Exception:
-            pass
+
+        if self._icon:
+            self._icon.title = self._determine_title(count)
+            try:
+                self._icon.update_menu()
+            except Exception:
+                pass
 
     def open_dashboard(self, icon: Optional[pystray.Icon] = None, item: Optional[MenuItem] = None) -> None:
         """Launch Streamlit web dashboard in background and open default browser."""
@@ -236,7 +294,7 @@ class PrivacyGuardTrayApp:
                 "--browser.serverAddress",
                 "localhost",
             ]
-            log_path = os.path.join(PROJECT_ROOT, "data", "streamlit_daemon.log")
+            log_path = resolve_path("data/streamlit_daemon.log")
             try:
                 os.makedirs(os.path.dirname(log_path), exist_ok=True)
                 log_file = open(log_path, "a", encoding="utf-8")
@@ -266,7 +324,7 @@ class PrivacyGuardTrayApp:
                 break
             if self._streamlit_proc is not None and self._streamlit_proc.poll() is not None:
                 exit_code = self._streamlit_proc.poll()
-                log_path = os.path.join(PROJECT_ROOT, "data", "streamlit_daemon.log")
+                log_path = resolve_path("data/streamlit_daemon.log")
                 logger.error("Streamlit terminated prematurely with exit code %s. Check %s", exit_code, log_path)
                 print(f"[-] Streamlit exited unexpectedly with code {exit_code}. Check {log_path}")
                 break
@@ -279,49 +337,74 @@ class PrivacyGuardTrayApp:
                 time.time() - start_wait,
             )
 
-        # Open browser
         webbrowser.open(url)
 
     def scan_now(self, icon: Optional[pystray.Icon] = None, item: Optional[MenuItem] = None) -> None:
         """Trigger an immediate manual scan in a background worker thread."""
         def _scan():
             new_alerts = self.guard_service.scan_now()
-            count = self.guard_service.alert_count
+            count = self.query_db_alert_count()
+            self.guard_service.alert_count = count
+            self._last_rendered_count = count
+
+            if getattr(self.guard_service, "sysmon_error", None):
+                self._sysmon_error = self.guard_service.sysmon_error
+
             if self._icon:
-                self._icon.title = f"PrivacyGuard - Đang bảo vệ ({count} cảnh báo)"
+                self._icon.title = self._determine_title(count)
                 try:
                     self._icon.update_menu()
                 except Exception:
                     pass
+
             self.guard_service.notifier.notify(
                 title="[PrivacyGuard] Quét Hoàn Tất",
                 message=f"Đã quét các sự kiện gần nhất. Tổng số cảnh báo: {count} (Mới: {new_alerts}).",
                 launch_url=f"http://localhost:{self.dashboard_port}",
             )
+
         t = threading.Thread(target=_scan, daemon=True)
         t.start()
 
-    def get_alert_count_text(self, item: MenuItem) -> str:
-        """Return dynamic alert count label queried directly from SQLite."""
-        count = self.guard_service.alert_count
-        try:
-            import sqlite3
-            if os.path.exists(self.db_path):
-                conn = sqlite3.connect(self.db_path, timeout=1.0)
-                cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM alerts")
-                row = cur.fetchone()
-                if row:
-                    count = int(row[0])
-                    self.guard_service.alert_count = count
-                conn.close()
-        except Exception as e:
-            logger.debug("Failed querying alert count for tray: %s", e)
-        return f"Xem số cảnh báo ({count} alerts)"
+    def _refresh_worker(self) -> None:
+        """Periodic background thread to sync tray icon title and menu with database count every 2 seconds."""
+        logger.debug("TrayMenuRefresher thread started.")
+        while self._running:
+            try:
+                count = self.query_db_alert_count()
+                self.guard_service.alert_count = count
+
+                # Check if Sysmon reported error during scans
+                guard_err = getattr(self.guard_service, "sysmon_error", None)
+                if guard_err:
+                    self._sysmon_error = guard_err
+
+                expected_title = self._determine_title(count)
+
+                if self._icon is not None:
+                    current_title = getattr(self._icon, "title", "")
+                    if current_title != expected_title or count != self._last_rendered_count:
+                        self._last_rendered_count = count
+                        self._icon.title = expected_title
+                        try:
+                            self._icon.update_menu()
+                        except Exception as me:
+                            logger.debug("update_menu failed: %s", me)
+            except Exception as e:
+                logger.debug("Error in tray refresh worker: %s", e)
+
+            # Sleep 2 seconds in small 0.1s increments for responsive exit
+            for _ in range(20):
+                if not self._running:
+                    break
+                time.sleep(0.1)
+
+        logger.debug("TrayMenuRefresher thread stopped.")
 
     def exit_app(self, icon: pystray.Icon, item: MenuItem) -> None:
         """Safely terminate real-time worker, streamlit process, and remove tray icon."""
         logger.info("Exiting PrivacyGuard System Tray Application...")
+        self._running = False
         self.guard_service.stop()
 
         if self._streamlit_proc is not None:
@@ -339,7 +422,20 @@ class PrivacyGuardTrayApp:
     def run(self) -> None:
         """Start the background guard service and run the pystray main loop."""
         logger.info("Starting PrivacyGuard Real-time Guard Service...")
+        self._running = True
         self.guard_service.start()
+
+        # Start background 2-second menu refresh worker
+        self._refresh_thread = threading.Thread(
+            target=self._refresh_worker,
+            daemon=True,
+            name="TrayMenuRefresher",
+        )
+        self._refresh_thread.start()
+
+        initial_count = self.query_db_alert_count()
+        self._last_rendered_count = initial_count
+        initial_title = self._determine_title(initial_count)
 
         menu = Menu(
             MenuItem(self.get_status_text, self.toggle_pause, default=False),
@@ -353,7 +449,7 @@ class PrivacyGuardTrayApp:
         self._icon = pystray.Icon(
             name="PrivacyGuard",
             icon=self.icon_image,
-            title=f"PrivacyGuard - Đang bảo vệ ({self.guard_service.alert_count} cảnh báo)",
+            title=initial_title,
             menu=menu,
         )
 

@@ -137,6 +137,13 @@ python cli.py
 .\dist\privacyguard\privacyguard.exe
 ```
 
+### 5.1. Khởi chạy Ứng dụng Khay Hệ thống (System Tray Guard)
+> [!IMPORTANT]
+> **Yêu cầu Quyền Administrator**: Do Windows Sysmon lưu log trong kênh bảo mật `Microsoft-Windows-Sysmon/Operational`, PrivacyGuard cần quyền Quản trị viên (Administrator) để đọc telemetry.
+> - **Cách 1 (Khuyên dùng)**: Nhấp đúp vào file `dist\privacyguard\Chay_PrivacyGuard_Admin.bat` (tự động kích hoạt UAC prompt).
+> - **Cách 2**: Nhấp chuột phải vào `dist\privacyguard\privacyguard.exe` chọn **"Run as administrator"**.
+> - **Cách 3 (Môi trường dev)**: Mở PowerShell quyền Admin và chạy `python cli.py` hoặc `python cli.py tray`.
+
 **Thao tác với Menu Chuột Phải:**
 - **"Trạng thái: Đang bảo vệ (Running)"**: Nhấp để Tạm dừng (Pause) hoặc Tiếp tục (Resume).
 - **"Mở Web Dashboard"**: Tự động kích hoạt Streamlit Dashboard và mở trình duyệt web.
@@ -148,6 +155,12 @@ python cli.py
 ```powershell
 # Xem trạng thái hệ thống và cơ sở dữ liệu
 python cli.py info
+
+# Dọn sạch cảnh báo rác trước khi thi/demo (giữ nguyên vẹn events và processes)
+python cli.py reset-alerts --yes
+
+# Kiểm thử luồng phát hiện rò rỉ và Toast cảnh báo
+python cli.py test-live
 
 # Chạy bộ thu thập Sysmon 60 giây
 python cli.py collect --duration 60

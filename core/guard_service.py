@@ -21,11 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 import numpy as np
 
-# Ensure project root is in sys.path
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
+from core.paths import resolve_path, get_default_config_path, get_default_db_path, PROJECT_ROOT
 from collector.sysmon_collector import LiveSysmonCollector, query_latest_record_id
 from core.store import EventStore
 from core.provenance import build_provenance_graph
@@ -33,6 +29,7 @@ from core.features import SlidingWindowFeatureExtractor, features_to_vector
 from core.explain import EvidenceExplainer, explain_alert, format_bytes_human
 from models.rules import RuleBasedDetector
 from models.autoencoder import AutoencoderDetector
+from core.sensitive import is_sensitive_path
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +45,8 @@ class ToastNotifier:
             self._winotify_available = True
         except ImportError:
             self._winotify_available = False
+        self.last_delivered: bool = False
+        self.last_fail_reason: Optional[str] = None
 
     def notify(
         self,
@@ -57,6 +56,7 @@ class ToastNotifier:
     ) -> bool:
         """Deliver native Windows toast notification with audio and robust fallbacks."""
         delivered = False
+        fail_reason: Optional[str] = None
 
         # 1. Primary: winotify Windows Toast
         if self._winotify_available:
@@ -77,6 +77,7 @@ class ToastNotifier:
                 toast.show()
                 delivered = True
             except Exception as e:
+                fail_reason = f"winotify: {e}"
                 logger.debug("winotify toast failed: %s", e)
 
         # 2. Secondary fallback: PowerShell (New-BurntToastNotification or WindowsRuntime Toast)
@@ -97,13 +98,19 @@ class ToastNotifier:
                     f"  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{self.app_id}').Show($toast); "
                     f"}}"
                 )
-                subprocess.run(
+                res = subprocess.run(
                     ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
                     capture_output=True,
                     timeout=2.5,
                 )
-                delivered = True
+                if res.returncode == 0:
+                    delivered = True
+                    fail_reason = None
+                else:
+                    err_msg = res.stderr.decode("latin1", errors="replace").strip()
+                    fail_reason = f"powershell exit {res.returncode}: {err_msg}"
             except Exception as e:
+                fail_reason = f"powershell: {e}"
                 logger.debug("PowerShell toast failed: %s", e)
 
         # 3. Audio Beep chime
@@ -129,11 +136,19 @@ class ToastNotifier:
             t = threading.Thread(target=_popup, daemon=True)
             t.start()
 
+        self.last_delivered = delivered
+        self.last_fail_reason = fail_reason
+
         # Make strings console safe for legacy Windows code pages
         try:
             safe_title = title.encode("ascii", "replace").decode("ascii")
             safe_msg = message.encode("ascii", "replace").decode("ascii")
-            logger.info("[TOAST ALERT] %s - %s (Delivered: %s)", safe_title, safe_msg, delivered)
+            logger.info(
+                "[TOAST NOTIFICATION] Title='%s' | Delivered=%s | Reason=%s",
+                safe_title,
+                delivered,
+                fail_reason or "Delivered successfully",
+            )
         except Exception:
             pass
         return delivered
@@ -149,12 +164,14 @@ class RealtimeGuardService:
         alert_threshold: float = 0.70,
         config_path: str = "config.yaml",
         enable_toast: bool = True,
+        poll_sysmon: bool = True,
     ):
-        self.db_path = db_path
+        self.db_path = resolve_path(db_path) if db_path != ":memory:" else db_path
+        self.config_path = resolve_path(config_path)
         self.polling_interval = polling_interval_sec
         self.alert_threshold = alert_threshold
-        self.config_path = config_path
         self.enable_toast = enable_toast
+        self.poll_sysmon = poll_sysmon
 
         self.store = EventStore(db_path=self.db_path)
         self.collector = LiveSysmonCollector(
@@ -162,6 +179,7 @@ class RealtimeGuardService:
             config_path=self.config_path,
             backfill=False,
         )
+        self.config = getattr(self.collector, "config", {}) or {}
         self.window_extractor = SlidingWindowFeatureExtractor(
             window_sec=60.0,
             step_sec=15.0,
@@ -171,13 +189,56 @@ class RealtimeGuardService:
         self.explainer = EvidenceExplainer()
         self.notifier = ToastNotifier()
 
+        # Build normalized ignore_processes set (matched by basename lowercase + optional .exe)
+        noise_filters = self.config.get("noise_filters", {})
+        raw_ignored = noise_filters.get("ignore_processes", ["privacyguard.exe", "collector", "streamlit"])
+        self.ignored_process_names: Set[str] = set()
+        for item in raw_ignored:
+            b = os.path.basename(str(item)).strip().lower()
+            if b:
+                self.ignored_process_names.add(b)
+                if b.endswith(".exe"):
+                    self.ignored_process_names.add(b[:-4])
+                else:
+                    self.ignored_process_names.add(b + ".exe")
+        # Ensure self and core utilities are always ignored
+        self.ignored_process_names.update([
+            "privacyguard",
+            "privacyguard.exe",
+            "collector",
+            "streamlit",
+            "tray_app.py",
+        ])
+
         self.running: bool = False
         self.paused: bool = False
         self.alert_count: int = self.store.count_alerts()
+        self.sysmon_error: Optional[str] = getattr(self.collector, "sysmon_error", None)
         self.last_scan_ts: float = 0.0
+        self.last_scanned_rx_id: int = self.store.get_max_receiver_log_id()
+        self.latest_scan_stats: Dict[str, Any] = {}
+        self.toast_warning: Optional[str] = None
         self._worker_thread: Optional[threading.Thread] = None
         self._alert_callbacks: List[Callable[[Dict[str, Any]], None]] = []
         self._processed_alert_keys: Set[str] = set()
+
+    def check_sysmon_status(self) -> tuple[bool, str]:
+        """Check whether Sysmon operational channel is accessible or requires elevation."""
+        try:
+            import win32evtlog
+            handle = win32evtlog.EvtQuery(
+                self.collector.channel,
+                win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryForwardDirection,
+                "*[System[(EventID=1 or EventID=3 or EventID=11)]]",
+            )
+            return True, "Active (Operational)"
+        except ImportError:
+            return False, "win32evtlog module not available"
+        except Exception as e:
+            err_str = str(e)
+            if "5" in err_str or "Access is denied" in err_str or "denied" in err_str.lower():
+                return False, "Thiếu quyền Admin (Access Denied)"
+            return False, f"Lỗi Sysmon: {e}"
 
     def add_alert_callback(self, cb: Callable[[Dict[str, Any]], None]) -> None:
         """Register a callback for alert notifications."""
@@ -199,8 +260,12 @@ class RealtimeGuardService:
     def is_running(self) -> bool:
         return self.running
 
-    def scan_now(self) -> int:
-        """Execute a single immediate detection cycle over recent events.
+    def scan_now(self, poll_sysmon: Optional[bool] = None) -> int:
+        """Execute a single immediate detection cycle over recent events with strict hard gating.
+
+        Args:
+            poll_sysmon: Optional override to control whether Sysmon channel is queried.
+                         Defaults to self.poll_sysmon.
 
         Returns:
             Number of new alerts detected.
@@ -208,11 +273,15 @@ class RealtimeGuardService:
         now = time.time()
         self.last_scan_ts = now
 
-        # 1. Poll channel for new events
-        try:
-            self.collector.poll_channel()
-        except Exception as e:
-            logger.debug("Error during Sysmon poll: %s", e)
+        # 1. Controlled Sysmon polling (only if enabled)
+        should_poll = self.poll_sysmon if poll_sysmon is None else poll_sysmon
+        if should_poll:
+            try:
+                self.collector.poll_channel()
+                self.sysmon_error = getattr(self.collector, "sysmon_error", None)
+            except Exception as e:
+                logger.debug("Error during Sysmon poll: %s", e)
+                self.sysmon_error = str(e)
 
         # 2. Flush in-memory queue to SQLite store
         event_batch = []
@@ -234,122 +303,392 @@ class RealtimeGuardService:
         if event_batch:
             self.store.insert_events_batch(event_batch)
 
-        # 3. Query events from the last 120 seconds with robust timestamp normalization
-        lookback_sec = 120.0
+        # 3. Check for new events and pending receiver logs using persistent watermark
         cur = self.store.conn.cursor()
+        cur.execute("SELECT MAX(id), MAX(ts) FROM events")
+        max_row = cur.fetchone()
+        if not max_row or max_row[0] is None:
+            return 0
 
-        # Check max timestamp in DB in case of simulated or skewed event timestamps
-        cur.execute("SELECT MAX(ts) FROM events")
-        max_ts_row = cur.fetchone()
-        max_ts_val = max_ts_row[0] if (max_ts_row and max_ts_row[0]) else now
-        effective_now = max(float(now), float(max_ts_val))
-        t_cutoff = effective_now - lookback_sec
+        max_event_id = int(max_row[0])
+        max_ts_val = float(max_row[1]) if max_row[1] is not None else now
+        last_scanned_id = self.store.get_last_scanned_event_id()
+        max_rx_id = self.store.get_max_receiver_log_id()
+
+        # Check if there are any un-enriched net_connect events with nbytes == 0 in the last 60 seconds
+        cur.execute("SELECT COUNT(*) FROM events WHERE type IN ('net_connect', 'net_send') AND nbytes = 0 AND ts >= ?", (now - 60.0,))
+        pending_zero_bytes_count = int(cur.fetchone()[0])
+
+        # If no new events, no new receiver logs, and no pending zero-byte events, exit immediately!
+        if last_scanned_id > 0 and max_event_id <= last_scanned_id and max_rx_id <= self.last_scanned_rx_id and pending_zero_bytes_count == 0:
+            return 0
+
+        # Query recent events within bounded lookback window (max 180s from max_ts_val)
+        rt_config = self.config.get("realtime_guard", {})
+        lookback_sec = float(rt_config.get("lookback_sec", 120.0))
+        max_lookback_sec = float(rt_config.get("max_lookback_sec", 180.0))
+        t_cutoff = max(float(now) - lookback_sec, max_ts_val - max_lookback_sec)
 
         cur.execute("SELECT * FROM events WHERE ts >= ? ORDER BY ts ASC", (t_cutoff,))
         recent_events = [dict(row) for row in cur.fetchall()]
 
-        # Fallback if empty: fetch latest 100 events within 180s of the most recent event
+        # If no events in lookback window, update watermark and return
         if not recent_events:
-            cur.execute("SELECT * FROM events ORDER BY ts DESC LIMIT 100")
-            recent_events = list(reversed([dict(row) for row in cur.fetchall()]))
-            if recent_events:
-                last_event_ts = float(recent_events[-1].get("ts", 0))
-                recent_events = [e for e in recent_events if (last_event_ts - float(e.get("ts", 0))) <= 180.0]
+            self.store.set_last_scanned_event_id(max_event_id)
+            self.last_scanned_rx_id = max_rx_id
+            return 0
 
-        if not recent_events:
+        # Parse extra_json for src_port if present
+        for e in recent_events:
+            if not e.get("src_port"):
+                extra = e.get("extra_json")
+                if isinstance(extra, str):
+                    try:
+                        e["src_port"] = json.loads(extra).get("src_port")
+                    except Exception:
+                        pass
+                elif isinstance(extra, dict):
+                    e["src_port"] = extra.get("src_port")
+
+        # Telemetry enrichment: query unmatched receiver_logs in [t_cutoff - 10, max_ts + 10]
+        rx_logs = self.store.get_receiver_logs(
+            t_start=t_cutoff - 10.0,
+            t_end=max_ts_val + 10.0,
+            unmatched_only=True,
+        )
+
+        for e in recent_events:
+            if e.get("type") in ("net_connect", "net_send") and int(e.get("nbytes", 0)) == 0 and rx_logs:
+                e_dest_port = e.get("dest_port")
+                e_src_port = e.get("src_port")
+                e_ts = float(e.get("ts", 0))
+
+                matched_rx = None
+                # Method 1: Match by (dest_port, src_port)
+                if e_src_port is not None:
+                    candidates = [
+                        rx for rx in rx_logs
+                        if rx.get("matched_event_id") is None
+                        and rx.get("dest_port") == e_dest_port
+                        and rx.get("src_port") == e_src_port
+                    ]
+                    if candidates:
+                        matched_rx = min(candidates, key=lambda rx: abs(rx["ts_utc"] - e_ts))
+
+                # Method 2: Match by (dest_port, |ts_utc - event.ts| <= 5s)
+                if matched_rx is None and e_dest_port is not None:
+                    candidates = [
+                        rx for rx in rx_logs
+                        if rx.get("matched_event_id") is None
+                        and rx.get("dest_port") == e_dest_port
+                        and abs(rx["ts_utc"] - e_ts) <= 5.0
+                    ]
+                    if candidates:
+                        matched_rx = min(candidates, key=lambda rx: abs(rx["ts_utc"] - e_ts))
+
+                if matched_rx is not None:
+                    real_bytes = int(matched_rx["bytes_received"])
+                    e["nbytes"] = real_bytes
+                    ev_id = int(e["id"]) if e.get("id") else None
+                    rx_id = int(matched_rx["id"])
+                    # Mark in-memory candidate so subsequent events in this cycle do not reuse it
+                    matched_rx["matched_event_id"] = ev_id or -1
+                    if ev_id is not None:
+                        try:
+                            self.store.update_event_nbytes(ev_id, real_bytes)
+                            self.store.set_receiver_log_matched_event_id(rx_id, ev_id)
+                        except Exception as err:
+                            logger.debug("Failed updating event nbytes or matched_event_id in DB: %s", err)
+
+        # Grace period: only evaluate events with ts <= now - 3 seconds (or offline / already-enriched events)
+        scoring_cutoff_ts = now - 3.0
+        ready_events = [
+            e for e in recent_events
+            if (float(e.get("ts", 0)) <= scoring_cutoff_ts) or (not should_poll) or (int(e.get("nbytes", 0)) > 0)
+        ]
+
+        # Initialize diagnostic funnel counters
+        counts = {
+            "ts": now,
+            "events_loaded": len(recent_events),
+            "not_ready": len(recent_events) - len(ready_events),
+            "windows_created": 0,
+            "no_proc_key": 0,
+            "not_direct_actor": 0,
+            "ignored_process": 0,
+            "no_causal": 0,
+            "bytes_below_min": 0,
+            "no_sensitive_file": 0,
+            "score_below_threshold": 0,
+            "duplicate": 0,
+            "alerts_created": 0,
+        }
+
+        if not ready_events:
+            self.store.insert_scan_stats(counts)
+            self.latest_scan_stats = counts
             return 0
 
         cur.execute("SELECT * FROM processes")
         processes = [dict(row) for row in cur.fetchall()]
         proc_map = {str(p["proc_key"]).strip().lower(): p for p in processes if p.get("proc_key")}
 
-        # 4. Extract sliding window feature records
+        # 4. Extract sliding window feature records on ready events
         windows = self.window_extractor.extract_windows(
-            events=recent_events,
+            events=ready_events,
             processes=processes,
         )
+        counts["windows_created"] = len(windows)
 
-        new_alerts = 0
+        min_exfil_bytes = int(rt_config.get("min_exfil_bytes", 1024))
+        cooldown_sec = float(rt_config.get("alert_cooldown_sec", 600.0))
+
+        detected_alerts: List[Dict[str, Any]] = []
+        cycle_seen_signatures: Set[tuple] = set()
+
+        # Direct actors: processes that directly performed file creation or network connection
+        direct_actors = {
+            str(e.get("proc_key")).strip().lower()
+            for e in ready_events
+            if e.get("type") in ("file_create", "net_connect", "net_send") and e.get("proc_key")
+        }
+
         for win in windows:
             vec = win.get("vector")
             feats = win.get("features", {})
             pk = win.get("proc_key")
-            has_causal = feats.get("has_causal_flow", 0.0) > 0.5
 
-            if not has_causal:
+            # CỔNG 0: Must have valid proc_key
+            if not pk:
+                counts["no_proc_key"] += 1
                 continue
 
+            # CỔNG 0.5: Skip ancestor processes that did not directly generate file or network events
+            if direct_actors and str(pk).strip().lower() not in direct_actors:
+                counts["not_direct_actor"] += 1
+                continue
+
+            p_info = proc_map.get(str(pk).strip().lower(), {})
+            raw_name = p_info.get("name") or win.get("proc_name") or ""
+            raw_exe = p_info.get("exe_path") or ""
+            proc_basename = os.path.basename(raw_name or raw_exe or str(pk)).strip().lower()
+
+            # HARD GATE 1: Process MUST NOT be in ignore_processes
+            if proc_basename in self.ignored_process_names or proc_basename.removesuffix(".exe") in self.ignored_process_names:
+                counts["ignored_process"] += 1
+                continue
+
+            # HARD GATE 2: Must have verified causal flow
+            has_causal = feats.get("has_causal_flow", 0.0) > 0.5
+            if not has_causal:
+                counts["no_causal"] += 1
+                continue
+
+            # Extract window events strictly belonging to this proc_key in [t_start, t_end]
+            t_start = float(win.get("t_start", 0.0))
+            t_end = float(win.get("t_end", 0.0))
+            proc_win_events = [
+                e for e in ready_events
+                if str(e.get("proc_key")).strip().lower() == str(pk).strip().lower()
+                and t_start <= float(e.get("ts", 0.0)) <= t_end
+            ]
+
+            # HARD GATE 3: Minimum exfiltration bytes threshold (rejects bytes_sent < min_exfil_bytes)
+            proc_net_events = [e for e in proc_win_events if e.get("type") in ("net_connect", "net_send")]
+            proc_bytes = sum(int(e.get("nbytes", 0)) for e in proc_net_events)
+            bytes_sent = proc_bytes if proc_net_events else int(feats.get("total_bytes_sent", 0))
+            if bytes_sent < min_exfil_bytes:
+                counts["bytes_below_min"] += 1
+                continue
+
+            # HARD GATE 4: Must touch at least 1 sensitive file (strictly for this window and proc_key)
+            proc_win_files = [
+                e.get("path")
+                for e in proc_win_events
+                if e.get("type") == "file_create"
+                and e.get("path")
+                and is_sensitive_path(e.get("path"))
+            ]
+            sensitive_files = list(dict.fromkeys([os.path.normpath(f) for f in proc_win_files]))
+
+            if not sensitive_files:
+                counts["no_sensitive_file"] += 1
+                continue
+
+            # Scoring: check risk score against threshold
             X = np.array([vec], dtype=np.float32)
             rule_score = float(self.rule_detector.score(X)[0])
+            if rule_score < self.alert_threshold:
+                counts["score_below_threshold"] += 1
+                continue
 
-            if rule_score >= self.alert_threshold:
-                # Deduplication key for recent identical window
-                dedup_key = f"{pk}:{int(win.get('t_start', 0))}:{int(win.get('t_end', 0))}"
-                if dedup_key in self._processed_alert_keys:
-                    continue
-                self._processed_alert_keys.add(dedup_key)
+            # Destination
+            dest_ip = "127.0.0.1"
+            dest_port = 8765
+            if proc_net_events:
+                dest_ip = proc_net_events[-1].get("dest_ip") or dest_ip
+                dest_port = proc_net_events[-1].get("dest_port") or dest_port
+            else:
+                dest_ip = win.get("dest_ip") or dest_ip
+                dest_port = win.get("dest_port") or dest_port
+            dest_str = f"{dest_ip}:{dest_port}"
 
-                p_info = proc_map.get(str(pk).strip().lower(), {})
-                proc_name = p_info.get("name") or "unknown.exe"
-                pid = p_info.get("pid") or 0
+            norm_file_tuple = tuple(sorted([os.path.basename(f).strip().lower() for f in sensitive_files]))
 
-                # Build provenance graph for this alert
-                G = build_provenance_graph(recent_events, delta_t_sec=30.0)
+            # In-cycle deduplication (prevent duplicate alerts for the same incident in the same scan cycle)
+            incident_sig = (str(pk), dest_str, norm_file_tuple)
+            if incident_sig in cycle_seen_signatures:
+                counts["duplicate"] += 1
+                continue
+            cycle_seen_signatures.add(incident_sig)
 
-                # Format alert dictionary
-                explanation = explain_alert(
-                    window=win,
-                    detector_name="RuleBased",
-                    score=rule_score,
-                    proc_info=p_info,
-                    provenance_graph=G,
+            # HARD GATE 5: Persistent deduplication against alerts table in DB within cooldown_sec
+            if self.store.has_recent_similar_alert(
+                proc_key=str(pk),
+                dest_str=dest_str,
+                sample_files=sensitive_files,
+                cooldown_sec=cooldown_sec,
+                now=now,
+            ):
+                counts["duplicate"] += 1
+                continue
+
+            # Populate window metadata strictly for this process and window
+            win["sensitive_files"] = sensitive_files
+            win["dest_ip"] = dest_ip
+            win["dest_port"] = dest_port
+            feats["total_bytes_sent"] = bytes_sent
+            feats["n_sensitive_files"] = len(sensitive_files)
+
+            # Build local provenance graph strictly for this proc_key's window events (no global G)
+            local_G = build_provenance_graph(proc_win_events, delta_t_sec=30.0)
+
+            proc_name = p_info.get("name") or win.get("proc_name") or "unknown.exe"
+            pid = p_info.get("pid") or win.get("pid") or 0
+
+            # Format alert dictionary
+            explanation = explain_alert(
+                window=win,
+                detector_name="RuleBased",
+                score=rule_score,
+                proc_info=p_info,
+                provenance_graph=local_G,
+            )
+
+            # Insert into alerts table
+            alert_id = self.store.insert_alert(
+                ts=now,
+                proc_key=str(pk),
+                detector="RuleBased",
+                score=rule_score,
+                severity="Cao",
+                evidence=json.dumps(explanation, ensure_ascii=False),
+                status="new",
+            )
+            self.alert_count = self.store.count_alerts()
+            counts["alerts_created"] += 1
+
+            logger.warning(
+                "[REALTIME ALERT #%d] High Risk Exfiltration from %s (PID: %s, Score: %.2f, Bytes: %d)",
+                alert_id,
+                proc_name,
+                pid,
+                rule_score,
+                bytes_sent,
+            )
+
+            detected_alerts.append({
+                "alert_id": alert_id,
+                "proc_name": proc_name,
+                "pid": pid,
+                "score": rule_score,
+                "bytes_sent": bytes_sent,
+                "dest_str": dest_str,
+                "explanation": explanation,
+            })
+
+            # Invoke UI callbacks
+            for cb in self._alert_callbacks:
+                try:
+                    cb(explanation)
+                except Exception as err:
+                    logger.debug("Alert callback error: %s", err)
+
+        # Strict funnel balance verification: windows_created must equal the sum of all terminal branches
+        total_accounted = (
+            counts["no_proc_key"]
+            + counts["not_direct_actor"]
+            + counts["ignored_process"]
+            + counts["no_causal"]
+            + counts["bytes_below_min"]
+            + counts["no_sensitive_file"]
+            + counts["score_below_threshold"]
+            + counts["duplicate"]
+            + counts["alerts_created"]
+        )
+        if total_accounted != counts["windows_created"]:
+            logger.warning(
+                "Funnel mismatch: windows_created=%d != total_accounted=%d (diff=%d)",
+                counts["windows_created"],
+                total_accounted,
+                counts["windows_created"] - total_accounted,
+            )
+        assert total_accounted == counts["windows_created"], (
+            f"Funnel mismatch: windows_created={counts['windows_created']} != total_accounted={total_accounted}"
+        )
+
+        # Record diagnostic stats for the scan cycle
+        self.store.insert_scan_stats(counts)
+        self.latest_scan_stats = counts
+
+        # 5. Persist watermark without advancing past unready zero-byte network events
+        unready_ids = [
+            int(e["id"]) for e in recent_events
+            if e.get("id") is not None and (
+                (float(e.get("ts", 0)) > scoring_cutoff_ts and int(e.get("nbytes", 0)) == 0)
+                or (e.get("type") in ("net_connect", "net_send") and int(e.get("nbytes", 0)) == 0 and (now - float(e.get("ts", 0))) < 15.0)
+            )
+        ]
+
+        if unready_ids:
+            min_unready_id = min(unready_ids)
+            new_watermark = max(last_scanned_id, min_unready_id - 1)
+        else:
+            new_watermark = max_event_id
+
+        self.store.set_last_scanned_event_id(new_watermark)
+        self.last_scanned_rx_id = max_rx_id
+
+        # 6. Single consolidated Toast Notification per scan cycle with transparency
+        if self.enable_toast and detected_alerts:
+            if len(detected_alerts) == 1:
+                al = detected_alerts[0]
+                t_title = "[PrivacyGuard] Phát hiện Rò rỉ Dữ liệu!"
+                t_msg = (
+                    f"Tiến trình {al['proc_name']} đã gửi {format_bytes_human(al['bytes_sent'])} ra ngoài ({al['dest_str']}) "
+                    f"sau khi truy cập file nhạy cảm. Click để mở Dashboard."
                 )
-
-                bytes_sent = int(feats.get("total_bytes_sent", 0))
-                bytes_str = format_bytes_human(bytes_sent)
-
-                # Insert into alerts table
-                alert_id = self.store.insert_alert(
-                    ts=now,
-                    proc_key=str(pk),
-                    detector="RuleBased",
-                    score=rule_score,
-                    severity="Cao",
-                    evidence=json.dumps(explanation, ensure_ascii=False),
-                    status="new",
+            else:
+                top_al = max(detected_alerts, key=lambda a: a["score"])
+                t_title = f"[PrivacyGuard] Phát hiện {len(detected_alerts)} Vụ Rò rỉ Dữ liệu!"
+                t_msg = (
+                    f"Nghiêm trọng nhất: {top_al['proc_name']} (Điểm: {int(top_al['score'] * 100)}%) "
+                    f"đã gửi {format_bytes_human(top_al['bytes_sent'])} ra {top_al['dest_str']}. Click để mở Dashboard."
                 )
-                self.alert_count = self.store.count_alerts()
-                new_alerts += 1
-
-                logger.warning(
-                    "[REALTIME ALERT #%d] High Risk Exfiltration from %s (PID: %s, Score: %.2f)",
-                    alert_id,
-                    proc_name,
-                    pid,
-                    rule_score,
+            delivered = self.notifier.notify(
+                title=t_title,
+                message=t_msg,
+                launch_url="http://localhost:8501",
+            )
+            if not delivered:
+                self.toast_warning = (
+                    f"⚠️ Toast Windows bị chặn bởi OS ({getattr(self.notifier, 'last_fail_reason', 'Muted')}). "
+                    f"Cảnh báo ({len(detected_alerts)} vụ) đã được lưu đầy đủ vào Database."
                 )
+            else:
+                self.toast_warning = None
 
-                # Trigger Toast Notification
-                if self.enable_toast:
-                    toast_title = "[PrivacyGuard] Phát hiện Rò rỉ Dữ liệu!"
-                    toast_msg = (
-                        f"Tiến trình {proc_name} đã gửi {bytes_str} ra ngoài "
-                        f"sau khi truy cập file nhạy cảm. Click để mở Dashboard."
-                    )
-                    self.notifier.notify(
-                        title=toast_title,
-                        message=toast_msg,
-                        launch_url="http://localhost:8501",
-                    )
-
-                # Invoke UI callbacks
-                for cb in self._alert_callbacks:
-                    try:
-                        cb(explanation)
-                    except Exception as err:
-                        logger.debug("Alert callback error: %s", err)
-
-        return new_alerts
+        return len(detected_alerts)
 
     def _guard_loop(self) -> None:
         """Background continuous surveillance loop."""
@@ -381,6 +720,13 @@ class RealtimeGuardService:
         self.paused = False
         self._worker_thread = threading.Thread(target=self._guard_loop, daemon=True, name="PrivacyGuardWorker")
         self._worker_thread.start()
+
+    def stop(self) -> None:
+        """Stop the background guard thread."""
+        self.running = False
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=2.0)
+        logger.info("RealtimeGuardService stopped successfully.")
 
     def trigger_test_alert(
         self,

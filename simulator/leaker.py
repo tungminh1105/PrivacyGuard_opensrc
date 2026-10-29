@@ -200,8 +200,16 @@ class ScenarioRunner:
 
     def scenario_1_bulk(self) -> int:
         """Scenario 1: Read multiple files, send in a single bulk transmission (Label 1)."""
-        self._touch_sensitive_file("ho_so_tai_chinh_temp.xlsx")
         files = get_fake_files(self.safe_docs_dir, count=10, rng=self.rng)
+        # Touch 4 documents in FakeDocuments to emit Sysmon Event 11 (FileCreate)
+        for f in files[:4]:
+            try:
+                with open(f, "ab") as fp:
+                    fp.write(b"\n")
+            except Exception:
+                pass
+        self._touch_sensitive_file("ho_so_tai_chinh_temp.xlsx")
+        time.sleep(0.05)
         buffer = bytearray()
         for f in files:
             with open(f, "rb") as fp:

@@ -111,14 +111,8 @@ class EvidenceExplainer:
         has_causal = float(feats.get("has_causal_flow", 0.0)) > 0.5
         is_signed = float(feats.get("is_signed_process", 0.0)) > 0.5
 
-        # 4. Sensitive files & network targets
+        # 4. Sensitive files & network targets (strictly from window)
         files_sample = window.get("sensitive_files") or []
-        if not files_sample and provenance_graph is not None:
-            files_sample = [
-                data.get("path", node.replace("file:", ""))
-                for node, data in provenance_graph.nodes(data=True)
-                if data.get("type") == "File" or str(node).startswith("file:")
-            ]
 
         # Sanitize file paths
         sanitized_files = [sanitize_user_path(f) for f in files_sample if f]

@@ -63,6 +63,8 @@ def run_pyinstaller_build(onefile: bool = True, clean: bool = True) -> int:
         "--hidden-import",
         "winotify",
         "--console",
+        "--uac-admin",
+        "--noconfirm",
     ]
 
     assets_dir = os.path.join(project_root, "assets")
@@ -93,11 +95,31 @@ def run_pyinstaller_build(onefile: bool = True, clean: bool = True) -> int:
         print(f"[+] Build successful! Output located in: {dist_path}")
         if onefile:
             exe_file = os.path.join(dist_path, "privacyguard.exe")
+            target_dirs = [dist_path]
         else:
             exe_file = os.path.join(dist_path, "privacyguard", "privacyguard.exe")
+            target_dirs = [dist_path, os.path.join(dist_path, "privacyguard")]
+
         if os.path.exists(exe_file):
             size_mb = os.path.getsize(exe_file) / (1024 * 1024)
             print(f"[+] Standalone binary: {exe_file} ({size_mb:.2f} MB)")
+
+        # Create Chay_PrivacyGuard_Admin.bat for one-click elevated launch
+        bat_content = (
+            "@echo off\r\n"
+            ":: ========================================================\r\n"
+            ":: Khoi chay PrivacyGuard voi dac quyen Administrator (UAC)\r\n"
+            ":: ========================================================\r\n"
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+            "\"Start-Process -FilePath '%~dp0privacyguard.exe' -Verb RunAs\"\r\n"
+        )
+        for td in target_dirs:
+            if os.path.exists(td):
+                bat_path = os.path.join(td, "Chay_PrivacyGuard_Admin.bat")
+                with open(bat_path, "w", encoding="utf-8") as bf:
+                    bf.write(bat_content)
+                print(f"[+] Created Administrator Launcher: {bat_path}")
+
         print("=" * 60 + "\n")
     else:
         print(f"\n[-] PyInstaller failed with exit code {res.returncode}")

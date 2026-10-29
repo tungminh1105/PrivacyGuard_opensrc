@@ -100,11 +100,12 @@ def test_guard_service_detects_and_persists_alert(temp_guard_workspace):
         polling_interval_sec=5.0,
         alert_threshold=0.70,
         enable_toast=False,  # Headless test
+        poll_sysmon=False,   # Headless isolated test - do not query host Sysmon
     )
     service.add_alert_callback(on_alert)
 
     # 4. Trigger single scan step
-    new_alerts = service.scan_now()
+    new_alerts = service.scan_now(poll_sysmon=False)
 
     assert new_alerts == 1
     assert service.alert_count == 1
@@ -266,5 +267,499 @@ def test_tray_app_dynamic_alert_counting(temp_guard_workspace):
     assert "(1 alerts)" in text_1
 
     app.guard_service.stop()
+
+
+def test_guard_service_resolves_absolute_db_path_on_different_cwd():
+    """Verify RealtimeGuardService resolves canonical absolute paths even when CWD is changed."""
+    import tempfile
+    from core.paths import PROJECT_ROOT
+
+    orig_cwd = os.getcwd()
+    tmp_dir = tempfile.mkdtemp(prefix="pg_cwd_test_")
+    try:
+        os.chdir(tmp_dir)
+        service = RealtimeGuardService(db_path="data/privacyguard.db", enable_toast=False, poll_sysmon=False)
+        try:
+            assert os.path.isabs(service.db_path)
+            assert service.db_path == os.path.abspath(os.path.join(PROJECT_ROOT, "data", "privacyguard.db"))
+            assert os.path.isabs(service.config_path)
+            assert service.config_path == os.path.abspath(os.path.join(PROJECT_ROOT, "config.yaml"))
+        finally:
+            service.stop()
+    finally:
+        os.chdir(orig_cwd)
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def test_tray_app_alert_count_queries_db_directly_ignoring_ram(temp_guard_workspace):
+    """Verify get_alert_count_text queries SQLite directly and ignores RAM state."""
+    import sqlite3
+    from ui.tray_app import PrivacyGuardTrayApp
+
+    db_path = temp_guard_workspace["db_path"]
+    app = PrivacyGuardTrayApp(db_path=db_path)
+
+    try:
+        # Directly insert into SQLite
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO alerts (ts, proc_key, detector, score, severity, evidence) VALUES (?, ?, ?, ?, ?, ?)",
+            (time.time(), "direct:123", "RuleBased", 0.95, "Cao", "{}"),
+        )
+        conn.commit()
+        conn.close()
+
+        # Intentionally sabotage RAM count
+        app.guard_service.alert_count = 9999
+
+        # Should query SQLite and return 1 alert, completely ignoring the 9999 in RAM
+        text = app.get_alert_count_text(None)
+        assert "(1 alerts)" in text
+        assert "9999" not in text
+    finally:
+        app.guard_service.stop()
+
+
+def test_guard_service_rejects_ignored_processes(temp_guard_workspace):
+    """Verify processes in ignore_processes (e.g. privacyguard.exe) never trigger alerts."""
+    db_path = temp_guard_workspace["db_path"]
+    store = EventStore(db_path=db_path)
+    now = time.time()
+    pk = "{pg-proc-guid-1111}"
+
+    store.upsert_process({
+        "proc_key": pk,
+        "pid": 5555,
+        "ppid": 1,
+        "name": "privacyguard.exe",
+        "exe_path": "C:\\Program Files\\PrivacyGuard\\privacyguard.exe",
+        "start_ts": now - 30.0,
+        "signed": 0,
+    })
+    events = [
+        {"ts": now - 20.0, "pid": 5555, "proc_key": pk, "type": "proc_start"},
+        {"ts": now - 15.0, "pid": 5555, "proc_key": pk, "type": "file_create", "path": "C:\\Docs\\sensitive.docx"},
+        {"ts": now - 10.0, "pid": 5555, "proc_key": pk, "type": "net_connect", "dest_ip": "1.2.3.4", "dest_port": 443, "proto": "tcp", "nbytes": 500000},
+    ]
+    store.insert_events_batch(events)
+    store.close()
+
+    service = RealtimeGuardService(db_path=db_path, poll_sysmon=False, enable_toast=False)
+    try:
+        new_alerts = service.scan_now(poll_sysmon=False)
+        assert new_alerts == 0
+        assert service.store.count_alerts() == 0
+    finally:
+        service.stop()
+
+
+def test_guard_service_rejects_under_min_exfil_bytes(temp_guard_workspace):
+    """Verify exfiltration with bytes_sent < min_exfil_bytes (e.g. 0 bytes) is rejected."""
+    db_path = temp_guard_workspace["db_path"]
+    store = EventStore(db_path=db_path)
+    now = time.time()
+    pk = "{small-leak-guid}"
+
+    store.upsert_process({
+        "proc_key": pk,
+        "pid": 4321,
+        "name": "malicious.exe",
+        "start_ts": now - 30.0,
+        "signed": 0,
+    })
+    # nbytes is 500 (< 1024)
+    events = [
+        {"ts": now - 20.0, "pid": 4321, "proc_key": pk, "type": "proc_start"},
+        {"ts": now - 15.0, "pid": 4321, "proc_key": pk, "type": "file_create", "path": "C:\\Docs\\sensitive.xlsx"},
+        {"ts": now - 10.0, "pid": 4321, "proc_key": pk, "type": "net_connect", "dest_ip": "1.2.3.4", "dest_port": 443, "proto": "tcp", "nbytes": 500},
+    ]
+    store.insert_events_batch(events)
+    store.close()
+
+    service = RealtimeGuardService(db_path=db_path, poll_sysmon=False, enable_toast=False)
+    try:
+        new_alerts = service.scan_now(poll_sysmon=False)
+        assert new_alerts == 0
+        assert service.store.count_alerts() == 0
+    finally:
+        service.stop()
+
+
+def test_guard_service_deduplication_cooldown(temp_guard_workspace):
+    """Verify identical exfiltration within cooldown period generates exactly 1 alert."""
+    db_path = temp_guard_workspace["db_path"]
+    store = EventStore(db_path=db_path)
+    now = time.time()
+    pk = "{dedup-test-guid}"
+
+    store.upsert_process({
+        "proc_key": pk,
+        "pid": 7777,
+        "name": "exfiltrator.exe",
+        "start_ts": now - 30.0,
+        "signed": 0,
+    })
+    events = [
+        {"ts": now - 20.0, "pid": 7777, "proc_key": pk, "type": "proc_start"},
+        {"ts": now - 15.0, "pid": 7777, "proc_key": pk, "type": "file_create", "path": "C:\\Docs\\passwords.kdbx"},
+        {"ts": now - 10.0, "pid": 7777, "proc_key": pk, "type": "net_connect", "dest_ip": "198.51.100.1", "dest_port": 443, "proto": "tcp", "nbytes": 100000},
+    ]
+    store.insert_events_batch(events)
+    store.close()
+
+    service = RealtimeGuardService(db_path=db_path, poll_sysmon=False, enable_toast=False)
+    try:
+        # First scan generates 1 alert
+        first_scan = service.scan_now(poll_sysmon=False)
+        assert first_scan == 1
+        assert service.store.count_alerts() == 1
+
+        # Second scan immediately on same DB generates 0 new alerts (watermark + cooldown)
+        second_scan = service.scan_now(poll_sysmon=False)
+        assert second_scan == 0
+        assert service.store.count_alerts() == 1
+    finally:
+        service.stop()
+
+
+def test_store_reset_alerts(temp_guard_workspace):
+    """Verify reset_alerts clears alerts table while keeping events and processes intact."""
+    db_path = temp_guard_workspace["db_path"]
+    store = EventStore(db_path=db_path)
+    now = time.time()
+
+    store.upsert_process({"proc_key": "p1", "pid": 11, "name": "p1.exe", "start_ts": now})
+    store.insert_events_batch([{"ts": now, "pid": 11, "proc_key": "p1", "type": "proc_start"}])
+    store.insert_alert(ts=now, proc_key="p1", detector="RuleBased", score=0.9, severity="Cao", evidence="{}")
+    store.insert_alert(ts=now, proc_key="p1", detector="RuleBased", score=0.8, severity="Cao", evidence="{}")
+
+    assert store.count_alerts() == 2
+    deleted = store.reset_alerts()
+    assert deleted == 2
+    assert store.count_alerts() == 0
+
+    # Ensure processes and events are not deleted
+    cur = store.conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM processes")
+    assert cur.fetchone()[0] == 1
+    cur.execute("SELECT COUNT(*) FROM events")
+    assert cur.fetchone()[0] == 1
+    store.close()
+
+
+def test_net_connect_enriched_with_receiver_logs_triggers_alert(temp_guard_workspace):
+    """Verify net_connect with nbytes=0 is enriched by receiver_logs and triggers alert."""
+    db_path = temp_guard_workspace["db_path"]
+    store = EventStore(db_path=db_path)
+    now = time.time()
+    pk = "{receiver-enrichment-guid}"
+
+    store.upsert_process({
+        "proc_key": pk,
+        "pid": 5555,
+        "name": "data_stealer.exe",
+        "start_ts": now - 30.0,
+        "signed": 0,
+    })
+    events = [
+        {"ts": now - 20.0, "pid": 5555, "proc_key": pk, "type": "proc_start"},
+        {"ts": now - 15.0, "pid": 5555, "proc_key": pk, "type": "file_create", "path": "C:\\Users\\User\\Documents\\confidential_report.xlsx"},
+        {
+            "ts": now - 10.0,
+            "pid": 5555,
+            "proc_key": pk,
+            "type": "net_connect",
+            "dest_ip": "127.0.0.1",
+            "dest_port": 8765,
+            "proto": "tcp",
+            "nbytes": 0,  # Sysmon Event 3 initially reports 0 bytes
+            "extra_json": json.dumps({"src_port": 49152}),
+        },
+    ]
+    store.insert_events_batch(events)
+
+    # Insert true byte count into receiver_logs matching (dest_port, src_port)
+    store.log_receiver_bytes(
+        ts_utc=now - 9.5,
+        src_ip="127.0.0.1",
+        src_port=49152,
+        dest_port=8765,
+        bytes_received=95000,
+    )
+    store.close()
+
+    service = RealtimeGuardService(db_path=db_path, poll_sysmon=False, enable_toast=False)
+    try:
+        new_alerts = service.scan_now(poll_sysmon=False)
+        assert new_alerts == 1
+        assert service.store.count_alerts() == 1
+
+        # Check evidence contains true bytes
+        cur = service.store.conn.cursor()
+        cur.execute("SELECT evidence FROM alerts ORDER BY id DESC LIMIT 1")
+        evidence = json.loads(cur.fetchone()[0])
+        assert evidence["bytes_sent"] == 95000
+    finally:
+        service.stop()
+
+
+def test_net_connect_without_receiver_logs_rejected_by_min_bytes(temp_guard_workspace):
+    """Verify net_connect with nbytes=0 and no receiver_logs is rejected by min_exfil_bytes gate."""
+    db_path = temp_guard_workspace["db_path"]
+    store = EventStore(db_path=db_path)
+    now = time.time()
+    pk = "{zero-byte-reject-guid}"
+
+    store.upsert_process({
+        "proc_key": pk,
+        "pid": 5556,
+        "name": "normal_app.exe",
+        "start_ts": now - 30.0,
+        "signed": 0,
+    })
+    events = [
+        {"ts": now - 20.0, "pid": 5556, "proc_key": pk, "type": "proc_start"},
+        {"ts": now - 15.0, "pid": 5556, "proc_key": pk, "type": "file_create", "path": "C:\\Users\\User\\Documents\\confidential_report.xlsx"},
+        {
+            "ts": now - 10.0,
+            "pid": 5556,
+            "proc_key": pk,
+            "type": "net_connect",
+            "dest_ip": "127.0.0.1",
+            "dest_port": 8765,
+            "proto": "tcp",
+            "nbytes": 0,  # 0 bytes and NO receiver_logs entry
+        },
+    ]
+    store.insert_events_batch(events)
+    store.close()
+
+    service = RealtimeGuardService(db_path=db_path, poll_sysmon=False, enable_toast=False)
+    try:
+        new_alerts = service.scan_now(poll_sysmon=False)
+        # Should be rejected by Gate 3: bytes_sent < min_exfil_bytes (1024)
+        assert new_alerts == 0
+        assert service.store.count_alerts() == 0
+        assert service.latest_scan_stats["bytes_below_min"] >= 1
+    finally:
+        service.stop()
+
+
+def test_alert_attribution_and_sensitive_files_subset(temp_guard_workspace):
+    """Verify alert is strictly attributed to python.exe (leaker) and sensitive_files <= 15 from FakeDocuments."""
+    db_path = temp_guard_workspace["db_path"]
+    store = EventStore(db_path=db_path)
+    now = time.time()
+
+    pk_pwsh = "{powershell-actor-1111}"
+    pk_py = "{python-leaker-2222}"
+
+    # 1. Upsert processes: powershell and python
+    store.upsert_process({
+        "proc_key": pk_pwsh,
+        "pid": 1001,
+        "name": "powershell.exe",
+        "start_ts": now - 40.0,
+        "signed": 1,
+    })
+    store.upsert_process({
+        "proc_key": pk_py,
+        "pid": 2002,
+        "name": "python.exe",
+        "start_ts": now - 35.0,
+        "signed": 0,
+    })
+
+    # 2. PowerShell events: only touches temp files, then connects
+    pwsh_events = [
+        {"ts": now - 30.0, "pid": 1001, "proc_key": pk_pwsh, "type": "proc_start"},
+        {"ts": now - 28.0, "pid": 1001, "proc_key": pk_pwsh, "type": "file_create", "path": r"C:\Users\User\AppData\Local\Temp\pwsh_temp.tmp"},
+        {"ts": now - 25.0, "pid": 1001, "proc_key": pk_pwsh, "type": "net_connect", "dest_ip": "1.1.1.1", "dest_port": 53, "nbytes": 50000},
+    ]
+
+    # 3. Python events: creates 3 sensitive files in FakeDocuments, then connects to 8765
+    py_docs = [
+        os.path.abspath("data/FakeDocuments/financial_report.xlsx"),
+        os.path.abspath("data/FakeDocuments/payroll_2026.docx"),
+        os.path.abspath("data/FakeDocuments/customer_records.csv"),
+    ]
+    py_events = [
+        {"ts": now - 20.0, "pid": 2002, "proc_key": pk_py, "type": "proc_start"},
+        {"ts": now - 18.0, "pid": 2002, "proc_key": pk_py, "type": "file_create", "path": py_docs[0]},
+        {"ts": now - 17.0, "pid": 2002, "proc_key": pk_py, "type": "file_create", "path": py_docs[1]},
+        {"ts": now - 16.0, "pid": 2002, "proc_key": pk_py, "type": "file_create", "path": py_docs[2]},
+        {
+            "ts": now - 10.0,
+            "pid": 2002,
+            "proc_key": pk_py,
+            "type": "net_connect",
+            "dest_ip": "127.0.0.1",
+            "dest_port": 8765,
+            "proto": "tcp",
+            "nbytes": 0,
+            "extra_json": json.dumps({"src_port": 51234}),
+        },
+    ]
+
+    store.insert_events_batch(pwsh_events + py_events)
+
+    # 4. Insert receiver_log matching python connection
+    store.log_receiver_bytes(
+        ts_utc=now - 9.8,
+        src_ip="127.0.0.1",
+        src_port=51234,
+        dest_port=8765,
+        bytes_received=65432,
+    )
+    store.close()
+
+    service = RealtimeGuardService(db_path=db_path, poll_sysmon=False, enable_toast=False)
+    try:
+        new_alerts = service.scan_now(poll_sysmon=False)
+        assert new_alerts == 1
+        assert service.store.count_alerts() == 1
+
+        cur = service.store.conn.cursor()
+        cur.execute("SELECT id, proc_key, evidence FROM alerts ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        assert row is not None
+        assert row[1] == pk_py
+
+        ev = json.loads(row[2])
+        # 1. Process attribution
+        assert ev["proc_name"] == "python.exe"
+
+        # 2. Bytes exact match
+        assert ev["bytes_sent"] == 65432
+
+        # 3. Sensitive files: subset of FakeDocuments, count <= 15
+        sens_files = ev["sensitive_files"]
+        assert len(sens_files) <= 15
+        assert len(sens_files) == 3
+        for f in sens_files:
+            assert "FakeDocuments" in f
+
+        # PowerShell must NOT generate an alert (rejected at causal/sensitive gates)
+        cur.execute("SELECT COUNT(*) FROM alerts WHERE proc_key = ?", (pk_pwsh,))
+        assert cur.fetchone()[0] == 0
+    finally:
+        service.stop()
+
+
+def test_two_consecutive_cycles_no_byte_reuse(temp_guard_workspace):
+    """Verify running 2 consecutive cycles never reuses receiver_logs and alert bytes do not exceed rx bytes."""
+    db_path = temp_guard_workspace["db_path"]
+    store = EventStore(db_path=db_path)
+    now = time.time()
+    pk = "{byte-reuse-prevent-guid}"
+
+    store.upsert_process({
+        "proc_key": pk,
+        "pid": 7788,
+        "name": "python.exe",
+        "start_ts": now - 30.0,
+        "signed": 0,
+    })
+
+    test_doc = os.path.abspath("data/FakeDocuments/ho_so_bao_mat.xlsx")
+    events = [
+        {"ts": now - 20.0, "pid": 7788, "proc_key": pk, "type": "proc_start"},
+        {"ts": now - 15.0, "pid": 7788, "proc_key": pk, "type": "file_create", "path": test_doc},
+        {
+            "ts": now - 10.0,
+            "pid": 7788,
+            "proc_key": pk,
+            "type": "net_connect",
+            "dest_ip": "127.0.0.1",
+            "dest_port": 8765,
+            "proto": "tcp",
+            "nbytes": 0,
+            "extra_json": json.dumps({"src_port": 52222}),
+        },
+    ]
+    store.insert_events_batch(events)
+
+    # Insert 1 receiver_log with 75000 bytes
+    store.log_receiver_bytes(
+        ts_utc=now - 9.5,
+        src_ip="127.0.0.1",
+        src_port=52222,
+        dest_port=8765,
+        bytes_received=75000,
+    )
+
+    cur = store.conn.cursor()
+    cur.execute("SELECT id, matched_event_id FROM receiver_logs WHERE src_port = 52222")
+    rx_before = cur.fetchone()
+    assert rx_before[1] is None  # initially unmatched
+    store.close()
+
+    service = RealtimeGuardService(db_path=db_path, poll_sysmon=False, enable_toast=False)
+    try:
+        # Cycle 1: First scan matches receiver log and generates 1 alert
+        alerts_1 = service.scan_now(poll_sysmon=False)
+        assert alerts_1 == 1
+
+        # Verify matched_event_id is now populated in DB
+        cur = service.store.conn.cursor()
+        cur.execute("SELECT id, matched_event_id, bytes_received FROM receiver_logs WHERE src_port = 52222")
+        rx_after = cur.fetchone()
+        assert rx_after[1] is not None
+        matched_ev_id = rx_after[1]
+
+        # Verify event was updated in DB
+        cur.execute("SELECT nbytes FROM events WHERE id = ?", (matched_ev_id,))
+        assert cur.fetchone()[0] == 75000
+
+        # Cycle 2: Insert a new zero-byte net_connect event at now - 1.0
+        new_event = {
+            "ts": now - 1.0,
+            "pid": 7788,
+            "proc_key": pk,
+            "type": "net_connect",
+            "dest_ip": "127.0.0.1",
+            "dest_port": 8765,
+            "proto": "tcp",
+            "nbytes": 0,
+            "extra_json": json.dumps({"src_port": 53333}),
+        }
+        service.store.insert_events_batch([new_event])
+
+        # Scan Cycle 2: Should NOT reuse the already-matched receiver log
+        alerts_2 = service.scan_now(poll_sysmon=False)
+        assert alerts_2 == 0  # rejected because nbytes remains 0 < 1024
+
+        # Total alert bytes in DB must not exceed real bytes received (75000)
+        cur.execute("SELECT evidence FROM alerts")
+        all_ev = [json.loads(row[0]) for row in cur.fetchall()]
+        total_alert_bytes = sum(ev.get("bytes_sent", 0) for ev in all_ev)
+        assert total_alert_bytes == 75000
+    finally:
+        service.stop()
+
+
+def test_realtime_guard_with_live_sysmon_poll(temp_guard_workspace):
+    """Verify guard service runs with poll_sysmon=True without alert storm on clean environment."""
+    db_path = temp_guard_workspace["db_path"]
+    service = RealtimeGuardService(
+        db_path=db_path,
+        polling_interval_sec=1.0,
+        enable_toast=False,
+        poll_sysmon=True,
+    )
+    try:
+        new_alerts = service.scan_now(poll_sysmon=True)
+        # Even with host Sysmon polled, zero exfiltration alerts should be created on idle system
+        assert new_alerts == 0
+        assert service.store.count_alerts() == 0
+    finally:
+        service.stop()
+
+
+
 
 

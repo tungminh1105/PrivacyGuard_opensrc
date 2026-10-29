@@ -28,11 +28,7 @@ try:
 except ImportError:
     yaml = None
 
-# Ensure project root is in sys.path
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
+from core.paths import resolve_path, get_default_config_path, get_default_db_path, PROJECT_ROOT
 from core.store import EventStore
 
 logger = logging.getLogger(__name__)
@@ -138,14 +134,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     """Load configuration from YAML file with fallback to default config."""
-    if os.path.exists(config_path) and yaml is not None:
+    resolved_path = resolve_path(config_path)
+    if os.path.exists(resolved_path) and yaml is not None:
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(resolved_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
                 if isinstance(data, dict):
                     return data
         except Exception as e:
-            logger.warning("Failed to parse %s: %s. Using default config.", config_path, e)
+            logger.warning("Failed to parse %s: %s. Using default config.", resolved_path, e)
     return DEFAULT_CONFIG
 
 
@@ -480,6 +477,14 @@ class SysmonParser:
                 dest_port = None
             proto = fields.get(field_map.get("protocol", "Protocol"))
 
+            src_port_val = fields.get(field_map.get("src_port", "SourcePort")) or fields.get("SourcePort")
+            try:
+                src_port = int(src_port_val) if src_port_val else None
+            except (ValueError, TypeError):
+                src_port = None
+            if src_port is not None:
+                extra_json["src_port"] = src_port
+
         elif event_id == 11:  # FileCreate
             target_fn_field = field_map.get("target_filename", "TargetFilename")
             raw_target_fn = fields.get(target_fn_field, "").strip()
@@ -522,6 +527,7 @@ class SysmonParser:
             "path": path,
             "dest_ip": dest_ip,
             "dest_port": dest_port,
+            "src_port": extra_json.get("src_port"),
             "proto": proto,
             "nbytes": 0,
             "image": fields.get(image_field),
@@ -662,9 +668,11 @@ class LiveSysmonCollector:
         backfill: bool = False,
         max_queue_size: int = 100000,
     ):
-        self.config = load_config(config_path)
+        self.db_path = resolve_path(db_path) if db_path != ":memory:" else db_path
+        self.config_path = resolve_path(config_path)
+        self.config = load_config(self.config_path)
         self.store = EventStore(
-            db_path=db_path,
+            db_path=self.db_path,
             wal_mode=self.config.get("database", {}).get("wal_mode", True),
         )
         self.parser = SysmonParser(config=self.config)
@@ -677,6 +685,7 @@ class LiveSysmonCollector:
         self.watermark: int = 0
         self.event_queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
         self.running = False
+        self.sysmon_error: Optional[str] = None
         self.total_received = 0
         self.total_written = 0
         self.tagged_count = 0
@@ -860,6 +869,7 @@ class LiveSysmonCollector:
         try:
             import win32evtlog
         except ImportError:
+            self.sysmon_error = "Module win32evtlog không khả dụng"
             return 0
 
         xpath = f"*[System[EventRecordID > {self.watermark}]]"
@@ -870,7 +880,13 @@ class LiveSysmonCollector:
                 win32evtlog.EvtQueryChannelPath | win32evtlog.EvtQueryForwardDirection,
                 xpath,
             )
+            self.sysmon_error = None
         except Exception as e:
+            err_str = str(e)
+            if "5" in err_str or "Access is denied" in err_str or "denied" in err_str.lower():
+                self.sysmon_error = "Lỗi quyền Admin (Access Denied)"
+            else:
+                self.sysmon_error = f"Lỗi Sysmon: {e}"
             logger.debug("EvtQuery error on %s: %s", self.channel, e)
             return 0
 
