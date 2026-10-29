@@ -433,6 +433,7 @@ def cmd_test_live(args: argparse.Namespace) -> None:
                 "proc_key": proc_key_sim,
                 "type": "proc_start",
                 "path": sys.executable,
+                "source": "synthetic",
             },
             {
                 "ts": t_leak_start + 0.05,
@@ -440,6 +441,7 @@ def cmd_test_live(args: argparse.Namespace) -> None:
                 "proc_key": proc_key_sim,
                 "type": "file_create",
                 "path": test_file_path,
+                "source": "synthetic",
             },
             {
                 "ts": t_leak_start + 0.1,
@@ -450,6 +452,7 @@ def cmd_test_live(args: argparse.Namespace) -> None:
                 "dest_port": port,
                 "proto": "tcp",
                 "nbytes": 96000,
+                "source": "synthetic",
             },
         ]
         guard.store.insert_events_batch(events)
@@ -513,6 +516,69 @@ def cmd_reset_alerts(args: argparse.Namespace) -> None:
 
     print(f"[+] Đã dọn sạch {count_deleted} bản ghi cảnh báo rác từ {db_path}.")
     print(f"[+] Bảng sự kiện (Events: {n_events}) và tiến trình (Processes: {n_proc}) vẫn được giữ nguyên vẹn 100%.")
+    print("=" * 60 + "\n")
+
+
+def cmd_purge_synthetic(args: argparse.Namespace) -> None:
+    """Purge synthetic simulation data (alerts, events, processes) from the database."""
+    from core.store import EventStore
+
+    if not getattr(args, "yes", False):
+        print("\n[-] LỖI XÁC NHẬN: Bạn phải truyền thêm cờ '--yes' để xác nhận xóa toàn bộ dữ liệu giả lập.")
+        print("    Ví dụ: python cli.py purge-synthetic --yes\n")
+        return
+
+    db_path = resolve_path(getattr(args, "db", "data/privacyguard.db"))
+    print("\n" + "=" * 60)
+    print("         PRIVACYGUARD PURGE SYNTHETIC DATA")
+    print("=" * 60)
+    print(f"[*] Target Database: {db_path}")
+
+    if not os.path.exists(db_path):
+        print(f"[-] Database file not found at: {db_path}")
+        return
+
+    store = EventStore(db_path=db_path)
+    cur = store.conn.cursor()
+
+    # 1. Delete synthetic alerts (#165-#169 and any proc_key LIKE '{leaker-%')
+    cur.execute("DELETE FROM alerts WHERE proc_key LIKE '{leaker-%' OR id IN (165, 166, 167, 168, 169)")
+    deleted_alerts = cur.rowcount
+
+    # 2. Delete synthetic events (proc_key LIKE '{leaker-%' or source = 'synthetic')
+    cur.execute("DELETE FROM events WHERE proc_key LIKE '{leaker-%' OR source = 'synthetic'")
+    deleted_events = cur.rowcount
+
+    # 3. Delete synthetic processes (proc_key LIKE '{leaker-%')
+    cur.execute("DELETE FROM processes WHERE proc_key LIKE '{leaker-%'")
+    deleted_proc = cur.rowcount
+
+    # 4. Unlink receiver_logs whose matched event was purged
+    cur.execute(
+        "UPDATE receiver_logs SET matched_event_id = NULL WHERE matched_event_id IS NOT NULL AND matched_event_id NOT IN (SELECT id FROM events)"
+    )
+    unlinked_rx = cur.rowcount
+
+    store.conn.commit()
+
+    # Verification query
+    cur.execute("SELECT COUNT(*) FROM events WHERE proc_key LIKE '{leaker-%'")
+    remaining_leaker_events = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM alerts WHERE proc_key LIKE '{leaker-%' OR id IN (165, 166, 167, 168, 169)")
+    remaining_leaker_alerts = cur.fetchone()[0]
+
+    store.close()
+
+    print(f"[+] Đã xóa {deleted_alerts} cảnh báo giả lập.")
+    print(f"[+] Đã xóa {deleted_events} sự kiện giả lập.")
+    print(f"[+] Đã xóa {deleted_proc} tiến trình giả lập.")
+    print(f"[+] Đã hủy liên kết {unlinked_rx} bản ghi receiver_logs.")
+    print(f"[*] Xác nhận: SELECT COUNT(*) FROM events WHERE proc_key LIKE '{{leaker-%' = {remaining_leaker_events}")
+    print(f"[*] Xác nhận: SELECT COUNT(*) FROM alerts WHERE proc_key LIKE '{{leaker-%' = {remaining_leaker_alerts}")
+    if remaining_leaker_events == 0 and remaining_leaker_alerts == 0:
+        print("[+] Dọn dẹp hoàn tất: Toàn bộ dữ liệu giả lập đã được loại bỏ 100%.")
+    else:
+        print("[-] CẢNH BÁO: Vẫn còn dữ liệu giả lập trong cơ sở dữ liệu.")
     print("=" * 60 + "\n")
 
 
@@ -662,7 +728,8 @@ def cmd_diag(args: argparse.Namespace) -> None:
 
 
 def cmd_test_real(args: argparse.Namespace) -> None:
-    """Execute real exfiltration attack test using scenario 1 and verify detection from real telemetry."""
+    """Execute real exfiltration attack test using scenario 1 and verify detection from real Sysmon telemetry."""
+    import re
     from core.store import EventStore
     from core.guard_service import RealtimeGuardService
 
@@ -675,12 +742,38 @@ def cmd_test_real(args: argparse.Namespace) -> None:
     print(f"[*] Target Database:      {db_path}")
     print(f"[*] Receiver Port:        {port}")
 
+    def is_admin() -> bool:
+        try:
+            import ctypes
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            return False
+
     store = EventStore(db_path=db_path)
     cur = store.conn.cursor()
     cur.execute("SELECT COALESCE(MAX(id), 0) FROM alerts")
     max_alert_id_before = cur.fetchone()[0]
     count_before = store.count_alerts()
     print(f"[*] Số cảnh báo trước test: {count_before} (Max ID: {max_alert_id_before})")
+
+    # Step A: Tạo guard TRƯỚC khi chạy leaker & kiểm tra quyền admin / Sysmon
+    print("[*] Khởi tạo RealtimeGuardService và kiểm tra quyền Sysmon...")
+    guard = RealtimeGuardService(db_path=db_path, poll_sysmon=True, enable_toast=True)
+    sysmon_ok, sysmon_desc = guard.check_sysmon_status()
+    if not is_admin() or not sysmon_ok:
+        print("[FAIL] Cần chạy PowerShell với quyền Administrator. Không có alert nào được tạo.")
+        guard.stop()
+        store.close()
+        sys.exit(2)
+
+    # Đặt watermark = query_latest_record_id(channel). KHÔNG để watermark = 0.
+    watermark_before = guard.prepare_live()
+    if watermark_before <= 0:
+        print("[FAIL] Cần chạy PowerShell với quyền Administrator. Không có alert nào được tạo.")
+        guard.stop()
+        store.close()
+        sys.exit(2)
+    print(f"[*] Watermark Sysmon ban đầu: EventRecordID = {watermark_before}")
 
     # Step 1: Ensure documents
     print("[*] Bước 1: Tạo/đảm bảo tài liệu nhạy cảm trong data/FakeDocuments...")
@@ -727,72 +820,25 @@ def cmd_test_real(args: argparse.Namespace) -> None:
             err_str = leaker_res.stderr.decode("latin1", errors="replace").strip()
             print(f"[-] Lỗi chạy tiến trình rò rỉ: {err_str}")
 
-        # Step 4: Grace delay for Sysmon and Receiver logging
-        print("[*] Bước 4: Chờ 2.5s để Sysmon và Receiver hoàn tất ghi log...")
-        time.sleep(2.5)
+        # Step 4: Chờ 3s để Sysmon và Receiver hoàn tất ghi log
+        print("[*] Bước 4: Chờ 3.0s để Sysmon và Receiver hoàn tất ghi log...")
+        time.sleep(3.0)
 
-        # Step 5: Check if tray is running or trigger scan
-        tray_active, tray_pid = is_tray_running()
-        detected = False
-        if tray_active:
-            print(f"[*] Phát hiện PrivacyGuard Tray đang chạy (PID: {tray_pid}). Chờ chu kỳ quét của Tray (tối đa 12s)...")
-            for sec in range(12):
-                time.sleep(1.0)
-                if store.count_alerts() > count_before:
-                    detected = True
-                    print(f"[+] Tray App đã tự động phát hiện và ghi nhận sau {sec + 1} giây!")
-                    break
-        if not detected:
-            print("[*] Kích hoạt RealtimeGuardService.scan_now() kiểm tra telemetry...")
-            guard = RealtimeGuardService(db_path=db_path, poll_sysmon=True, enable_toast=True)
-            guard.scan_now()
-            # If Sysmon channel query was denied due to unelevated terminal, ingest leaker telemetry with nbytes=0
-            if getattr(guard, "sysmon_error", None) and "denied" in str(guard.sysmon_error).lower():
-                cur = store.conn.cursor()
-                cur.execute(
-                    "SELECT id, ts_utc, src_ip, src_port, dest_port, bytes_received FROM receiver_logs WHERE dest_port = ? AND ts_utc >= ? ORDER BY id DESC LIMIT 1",
-                    (port, t_leak_start - 3.0),
-                )
-                rx_row = cur.fetchone()
-                if rx_row:
-                    pid_sim = 8888
-                    proc_key_sim = f"{{leaker-python-{int(t_leak_start)}}}"
-                    guard.store.upsert_process({
-                        "proc_key": proc_key_sim,
-                        "pid": pid_sim,
-                        "name": "python.exe",
-                        "exe_path": py_exec,
-                        "start_ts": t_leak_start,
-                        "signed": 0,
-                    })
-                    from simulator.leaker import get_fake_files
-                    fake_fs = get_fake_files(os.path.abspath("data/FakeDocuments"))
-                    touched_files = [
-                        os.path.abspath("data/FakeDocuments/ho_so_tai_chinh_temp.xlsx"),
-                    ]
-                    for f in fake_fs[:4]:
-                        if f not in touched_files:
-                            touched_files.append(f)
+        # Step 5: Quét telemetry thật bằng Sysmon
+        print("[*] Bước 5: Kích hoạt guard.scan_now(poll_sysmon=True) quét Sysmon thật...")
+        guard.scan_now(poll_sysmon=True)
+        watermark_after = guard.collector.watermark
+        ingested = getattr(guard, "last_ingested", 0)
 
-                    evs = [
-                        {"ts": t_leak_start, "pid": pid_sim, "proc_key": proc_key_sim, "type": "proc_start", "path": py_exec},
-                    ]
-                    for idx, tf in enumerate(touched_files):
-                        evs.append({"ts": t_leak_start + 0.02 * (idx + 1), "pid": pid_sim, "proc_key": proc_key_sim, "type": "file_create", "path": tf})
-                    evs.append({
-                        "ts": t_leak_start + 0.15,
-                        "pid": pid_sim,
-                        "proc_key": proc_key_sim,
-                        "type": "net_connect",
-                        "dest_ip": "127.0.0.1",
-                        "dest_port": port,
-                        "proto": "tcp",
-                        "nbytes": 0,  # 0 bytes, to be enriched strictly from receiver_logs
-                        "extra_json": json.dumps({"src_port": rx_row[3]}),
-                    })
-                    guard.store.insert_events_batch(evs)
-                    guard.scan_now(poll_sysmon=False)
-            guard.stop()
+        print(f"[*] Telemetry Sysmon nạp:")
+        print(f"    - watermark_before: {watermark_before}")
+        print(f"    - watermark_after:  {watermark_after}")
+        print(f"    - số event đã nạp:  {ingested}")
+
+        if not (0 < ingested < 5000):
+            print(f"[-] Cảnh báo: số event đã nạp nằm ngoài khoảng kỳ vọng (0 < {ingested} < 5000).")
+
+        guard.stop()
 
         count_after = store.count_alerts()
         new_alerts = count_after - count_before
@@ -809,49 +855,83 @@ def cmd_test_real(args: argparse.Namespace) -> None:
                 (max_alert_id_before,),
             )
             rows = cur.fetchall()
-            if not rows:
-                cur.execute("SELECT id, ts, proc_key, detector, severity, score, evidence FROM alerts ORDER BY id DESC LIMIT 1")
-                rows = cur.fetchall()
+
+            guid_regex = re.compile(r"^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$")
+            has_error = False
 
             for row in rows:
+                alert_id = row[0]
+                alert_pk = str(row[2])
                 ev = json.loads(row[6]) if row[6] else {}
                 real_bytes = ev.get("bytes_sent", 0)
-                proc_name = ev.get("proc_name") or row[2]
+                proc_name = ev.get("proc_name") or alert_pk
                 sens_files = ev.get("sensitive_files") or []
                 n_sensitive = len(sens_files)
                 first_5_files = sens_files[:5]
                 dest_info = ev.get("dest_str") or f"{ev.get('dest_ip')}:{ev.get('dest_port')}"
 
-                # Query the matched receiver_logs row corresponding to this leak
+                # Query process PID from processes table or evidence
+                cur.execute("SELECT pid FROM processes WHERE proc_key = ?", (alert_pk,))
+                p_row = cur.fetchone()
+                alert_pid = p_row[0] if p_row else ev.get("pid", 0)
+
+                # Query matched receiver_logs
                 cur.execute(
                     "SELECT bytes_received FROM receiver_logs WHERE dest_port = ? AND ts_utc >= ? ORDER BY id DESC LIMIT 1",
                     (port, t_leak_start - 5.0),
                 )
                 rx_row = cur.fetchone()
-                if not rx_row:
-                    cur.execute("SELECT bytes_received FROM receiver_logs WHERE matched_event_id IS NOT NULL ORDER BY id DESC LIMIT 1")
-                    rx_row = cur.fetchone()
                 rx_bytes = rx_row[0] if rx_row else real_bytes
                 diff = abs(real_bytes - rx_bytes)
 
-                print(f"    - alert id:            #{row[0]}")
-                print(f"    - proc_name:           {proc_name}")
+                # Check event sources for this alert's proc_key
+                cur.execute("SELECT DISTINCT source FROM events WHERE proc_key = ?", (alert_pk,))
+                sources = [s[0] for s in cur.fetchall() if s[0]]
+                if not sources or any(s != "sysmon" for s in sources):
+                    print(f"[-] [FAIL] Alert #{alert_id} có nguồn sự kiện không hợp lệ: {sources}. Chỉ chấp nhận 'sysmon'.")
+                    has_error = True
+
+                # Check proc_key Sysmon GUID format
+                if not guid_regex.match(alert_pk):
+                    print(f"[-] [FAIL] Alert #{alert_id} proc_key không khớp Sysmon GUID: {alert_pk}")
+                    has_error = True
+
+                # Check PID != 8888
+                if alert_pid == 8888:
+                    print(f"[-] [FAIL] Alert #{alert_id} có pid = 8888 (dấu hiệu giả lập).")
+                    has_error = True
+
+                print(f"    - alert id:            #{alert_id}")
+                print(f"    - proc_key:            {alert_pk}")
+                print(f"    - pid:                 {alert_pid}")
                 print(f"    - bytes_sent:          {real_bytes}")
+                print(f"    - receiver bytes:      {rx_bytes} (diff: {diff})")
                 print(f"    - n_sensitive:         {n_sensitive}")
-                print(f"    - 5 file đầu tiên:     {first_5_files}")
-                print(f"    - receiver_logs bytes: {rx_bytes} (Sai lệch: {diff})")
+                print(f"    - 5 file đầu:          {first_5_files}")
+                print(f"    - watermark_before:    {watermark_before}")
+                print(f"    - watermark_after:     {watermark_after}")
+                print(f"    - ingested:            {ingested}")
                 print(f"    - Đích gửi:            {dest_info}")
                 print(f"    - Điểm rủi ro:         {row[5]:.2f} ({row[4]})")
-                print(f"[+] XÁC NHẬN THÀNH CÔNG: Cảnh báo được gán đúng tiến trình {proc_name}, dung lượng {real_bytes} bytes từ receiver_logs.")
+
+            if has_error:
+                print("\n[-] [FAIL] Kiểm chứng không đạt tiêu chuẩn telemetry Sysmon thật.")
+                store.close()
+                sys.exit(1)
+
+            print(f"[+] XÁC NHẬN THÀNH CÔNG: Cảnh báo bắt nguồn từ Sysmon thật, khớp receiver_logs.")
         else:
-            print(f"[-] Chưa ghi nhận alert mới. Hãy chạy 'privacyguard.exe diag' để xem phễu lọc chặn tại cổng nào.")
+            print(f"[-] [FAIL] Chưa ghi nhận alert mới từ Sysmon.")
+            store.close()
+            sys.exit(1)
 
         print("=" * 65 + "\n")
 
     finally:
-        if receiver_proc:
-            receiver_proc.terminate()
+        if receiver_proc is not None:
+            print("[*] Đóng TCP Receiver Server...")
             try:
+                receiver_proc.terminate()
                 receiver_proc.wait(timeout=2.0)
             except Exception:
                 pass
@@ -941,6 +1021,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_reset.add_argument("--db", type=str, default="data/privacyguard.db", help="Path to SQLite database")
     p_reset.add_argument("--yes", action="store_true", help="Confirm deletion of all alerts")
     p_reset.set_defaults(func=cmd_reset_alerts)
+
+    # purge-synthetic
+    p_purge = subparsers.add_parser("purge-synthetic", help="Purge synthetic mock data (alerts, events, processes)")
+    p_purge.add_argument("--db", type=str, default="data/privacyguard.db", help="Path to SQLite database")
+    p_purge.add_argument("--yes", action="store_true", help="Confirm deletion of synthetic data")
+    p_purge.set_defaults(func=cmd_purge_synthetic)
 
     return parser
 

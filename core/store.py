@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS events (
   dest_port INTEGER,
   proto TEXT,
   nbytes INTEGER DEFAULT 0,
+  source TEXT DEFAULT 'sysmon',
   extra_json TEXT DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -157,6 +158,15 @@ class EventStore:
             logger.debug("Migration check on receiver_logs failed: %s", e)
 
         try:
+            cur.execute("PRAGMA table_info(events)")
+            cols = [col[1] for col in cur.fetchall()]
+            if "source" not in cols and cols:
+                cur.execute("ALTER TABLE events ADD COLUMN source TEXT DEFAULT 'sysmon'")
+                self.conn.commit()
+        except Exception as e:
+            logger.debug("Migration check on events source failed: %s", e)
+
+        try:
             cur.execute("PRAGMA table_info(scan_stats)")
             cols = [col[1] for col in cur.fetchall()]
             for c in ["no_proc_key", "not_direct_actor", "not_ready"]:
@@ -217,8 +227,8 @@ class EventStore:
             return 0
 
         sql = """
-        INSERT INTO events (ts, pid, ppid, proc_key, type, path, dest_ip, dest_port, proto, nbytes, extra_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO events (ts, pid, ppid, proc_key, type, path, dest_ip, dest_port, proto, nbytes, source, extra_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         rows = []
         for e in to_insert:
@@ -236,6 +246,7 @@ class EventStore:
                 int(e["dest_port"]) if e.get("dest_port") is not None else None,
                 e.get("proto"),
                 int(e.get("nbytes", 0)),
+                str(e.get("source", "sysmon")),
                 extra,
             ))
 

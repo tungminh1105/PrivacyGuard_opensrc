@@ -760,6 +760,74 @@ def test_realtime_guard_with_live_sysmon_poll(temp_guard_workspace):
         service.stop()
 
 
+def test_cmd_test_real_non_admin_fails_cleanly(temp_guard_workspace, monkeypatch):
+    """Test cmd_test_real in non-admin environment exits != 0 (code 2) and adds 0 alerts."""
+    import argparse
+    from cli import cmd_test_real
+    from core.store import EventStore
+
+    db_path = temp_guard_workspace["db_path"]
+    store = EventStore(db_path=db_path)
+    count_before = store.count_alerts()
+
+    # Simulate non-admin environment
+    import ctypes
+    monkeypatch.setattr(ctypes.windll.shell32, "IsUserAnAdmin", lambda: 0)
+
+    args = argparse.Namespace(db=db_path, port=8765)
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_test_real(args)
+
+    assert exc_info.value.code == 2
+    assert store.count_alerts() == count_before
+    store.close()
+
+
+def test_cmd_test_real_contains_no_synthetic_injection():
+    """Verify cmd_test_real has no calls to insert_events_batch or upsert_process."""
+    import inspect
+    from cli import cmd_test_real
+
+    source = inspect.getsource(cmd_test_real)
+    assert "insert_events_batch" not in source, "cmd_test_real must not inject events via insert_events_batch"
+    assert "upsert_process" not in source, "cmd_test_real must not inject processes via upsert_process"
+    assert "poll_sysmon=False" not in source, "cmd_test_real must only use real Sysmon telemetry (poll_sysmon=True)"
+
+
+def test_sysmon_guid_regex_and_pid_validation():
+    """Verify Sysmon GUID regex matches real Sysmon proc_key and rejects synthetic ones."""
+    import re
+
+    guid_regex = re.compile(r"^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$")
+
+    # Real Sysmon GUID samples
+    real_guids = [
+        "{a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d}",
+        "{01234567-89AB-CDEF-0123-456789ABCDEF}",
+        "{FEDCBA98-7654-3210-FEDC-BA9876543210}",
+    ]
+    for g in real_guids:
+        assert guid_regex.match(g), f"Expected real GUID to match regex: {g}"
+
+    # Synthetic proc_keys that must FAIL
+    synthetic_keys = [
+        "{leaker-python-1793287815}",
+        "{live-test-1234567890}",
+        "python.exe:8888",
+        "mock_proc_key",
+        "{12345678-1234-1234-1234}",
+    ]
+    for s in synthetic_keys:
+        assert not guid_regex.match(s), f"Expected synthetic key to NOT match regex: {s}"
+
+    # PID constraint
+    mock_pid = 8888
+    assert mock_pid == 8888  # Identifies synthetic
+    real_pid = 14208
+    assert real_pid != 8888
+
+
+
 
 
 

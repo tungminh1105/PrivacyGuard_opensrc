@@ -217,6 +217,7 @@ class RealtimeGuardService:
         self.last_scan_ts: float = 0.0
         self.last_scanned_rx_id: int = self.store.get_max_receiver_log_id()
         self.latest_scan_stats: Dict[str, Any] = {}
+        self.last_ingested: int = 0
         self.toast_warning: Optional[str] = None
         self._worker_thread: Optional[threading.Thread] = None
         self._alert_callbacks: List[Callable[[Dict[str, Any]], None]] = []
@@ -239,6 +240,10 @@ class RealtimeGuardService:
             if "5" in err_str or "Access is denied" in err_str or "denied" in err_str.lower():
                 return False, "Thiếu quyền Admin (Access Denied)"
             return False, f"Lỗi Sysmon: {e}"
+
+    def prepare_live(self) -> int:
+        """Synchronize collector watermark to the latest live Sysmon record ID before monitoring."""
+        return self.collector.prepare_live()
 
     def add_alert_callback(self, cb: Callable[[Dict[str, Any]], None]) -> None:
         """Register a callback for alert notifications."""
@@ -275,13 +280,15 @@ class RealtimeGuardService:
 
         # 1. Controlled Sysmon polling (only if enabled)
         should_poll = self.poll_sysmon if poll_sysmon is None else poll_sysmon
+        ingested = 0
         if should_poll:
             try:
-                self.collector.poll_channel()
+                ingested = self.collector.poll_channel()
                 self.sysmon_error = getattr(self.collector, "sysmon_error", None)
             except Exception as e:
                 logger.debug("Error during Sysmon poll: %s", e)
                 self.sysmon_error = str(e)
+        self.last_ingested = ingested
 
         # 2. Flush in-memory queue to SQLite store
         event_batch = []

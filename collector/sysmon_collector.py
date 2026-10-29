@@ -530,6 +530,7 @@ class SysmonParser:
             "src_port": extra_json.get("src_port"),
             "proto": proto,
             "nbytes": 0,
+            "source": "sysmon",
             "image": fields.get(image_field),
             "extra_json": extra_json if extra_json else None,
         }
@@ -863,6 +864,14 @@ class LiveSysmonCollector:
                 if rec_id is not None and rec_id > self.watermark:
                     self.watermark = rec_id
         return accepted
+
+    def prepare_live(self) -> int:
+        """Query latest live EventRecordID from Sysmon and set as initial watermark."""
+        latest_id = query_latest_record_id(self.channel)
+        if latest_id > 0:
+            self.watermark = latest_id
+            logger.info("LiveSysmonCollector synchronized watermark to %d", self.watermark)
+        return self.watermark
 
     def poll_channel(self) -> int:
         """Query channel for events with EventRecordID > watermark."""
