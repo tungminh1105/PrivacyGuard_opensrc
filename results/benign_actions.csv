@@ -1,0 +1,38 @@
+run_id,id,timestamp,action_type,target_path,duration_sec,status,details
+run_20261031_214101,1,2026-10-31T21:41:07.299450,pytest_test,tests/test_explain.py,5.904,SUCCESS,Ran test_explain.py -> .....                                                       
+run_20261031_214332,1,2026-10-31T21:43:33.238070,pytest_test,tests/test_explain.py,0.729,SUCCESS,Ran test_explain.py -> .....                                                       
+run_20261031_214332,2,2026-10-31T21:46:07.386050,web_download,C:\Users\Tungminh\Downloads\BenignWorkload\web_download_966.html,0.483,SUCCESS,Downloaded 92836 bytes from https://www.google.com to Downloads
+run_20261031_214332,3,2026-10-31T21:50:25.870833,web_download,C:\Users\Tungminh\Downloads\BenignWorkload\web_download_225.html,0.370,SUCCESS,Downloaded 92729 bytes from https://www.google.com to Downloads
+run_20261031_214332,4,2026-10-31T21:53:13.280085,git_ops,D:\KERNAL PROTECT\privacyguard,0.093,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,5,2026-10-31T21:57:24.250367,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_644.docx,0.008,SUCCESS,"Created ke_hoach_cong_viec_644.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,6,2026-10-31T22:02:05.038337,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_925.docx,0.005,SUCCESS,"Created ke_hoach_cong_viec_925.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,7,2026-10-31T22:06:39.802512,git_ops,D:\KERNAL PROTECT\privacyguard,0.054,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,8,2026-10-31T22:08:52.669095,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_332.docx,0.013,SUCCESS,"Created ke_hoach_cong_viec_332.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,9,2026-10-31T22:12:43.654071,git_ops,D:\KERNAL PROTECT\privacyguard,0.057,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,10,2026-10-31T22:17:43.802293,pytest_test,tests/test_explain.py,0.764,SUCCESS,Ran test_explain.py -> .....                                                       
+run_20261031_214332,11,2026-10-31T22:19:55.442394,pytest_test,tests/test_explain.py,0.782,SUCCESS,Ran test_explain.py -> .....                                                       
+run_20261031_214332,12,2026-10-31T22:23:54.221999,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_234.docx,0.007,SUCCESS,"Created ke_hoach_cong_viec_234.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,13,2026-10-31T22:28:40.201310,git_ops,D:\KERNAL PROTECT\privacyguard,0.058,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,14,2026-10-31T22:31:21.936214,web_download,C:\Users\Tungminh\Downloads\BenignWorkload\web_download_681.html,0.406,SUCCESS,Downloaded 92787 bytes from https://www.google.com to Downloads
+run_20261031_214332,15,2026-10-31T22:36:07.580205,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_967.docx,0.006,SUCCESS,"Created ke_hoach_cong_viec_967.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,16,2026-10-31T22:39:17.598673,web_download,C:\Users\Tungminh\Downloads\BenignWorkload\web_download_157.html,0.376,SUCCESS,Downloaded 92863 bytes from https://www.google.com to Downloads
+run_20261031_214332,17,2026-10-31T22:41:27.735223,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_287.docx,0.003,SUCCESS,"Created ke_hoach_cong_viec_287.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,18,2026-10-31T22:46:07.983987,pytest_test,tests/test_explain.py,0.795,SUCCESS,Ran test_explain.py -> .....                                                       
+run_20261031_214332,19,2026-10-31T22:49:38.180419,pytest_test,tests/test_explain.py,0.828,SUCCESS,Ran test_explain.py -> .....                                                       
+run_20261031_214332,20,2026-10-31T22:51:44.855015,git_ops,D:\KERNAL PROTECT\privacyguard,0.058,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,21,2026-10-31T22:54:18.090709,git_ops,D:\KERNAL PROTECT\privacyguard,0.085,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,22,2026-10-31T22:56:40.210142,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_200.docx,0.007,SUCCESS,"Created ke_hoach_cong_viec_200.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,23,2026-10-31T23:01:29.796765,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_489.docx,0.012,SUCCESS,"Created ke_hoach_cong_viec_489.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,24,2026-10-31T23:04:50.310607,web_download,C:\Users\Tungminh\Downloads\BenignWorkload\web_download_689.html,0.391,SUCCESS,Downloaded 92658 bytes from https://www.google.com to Downloads
+run_20261031_214332,25,2026-10-31T23:07:21.038626,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_841.docx,0.013,SUCCESS,"Created ke_hoach_cong_viec_841.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,26,2026-10-31T23:09:31.704496,pytest_test,tests/test_explain.py,0.775,SUCCESS,Ran test_explain.py -> .....                                                       
+run_20261031_214332,27,2026-10-31T23:12:37.200979,web_download,C:\Users\Tungminh\Downloads\BenignWorkload\web_download_156.html,0.393,SUCCESS,Downloaded 92759 bytes from https://www.google.com to Downloads
+run_20261031_214332,28,2026-10-31T23:15:06.268901,web_download,C:\Users\Tungminh\Downloads\BenignWorkload\web_download_305.html,0.385,SUCCESS,Downloaded 92701 bytes from https://www.google.com to Downloads
+run_20261031_214332,29,2026-10-31T23:19:02.853124,git_ops,D:\KERNAL PROTECT\privacyguard,0.076,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,30,2026-10-31T23:22:35.101677,git_ops,D:\KERNAL PROTECT\privacyguard,0.076,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,31,2026-10-31T23:26:43.601513,doc_lifecycle,C:\Users\Tungminh\Documents\BenignWorkload\ke_hoach_cong_viec_3.docx,0.012,SUCCESS,"Created ke_hoach_cong_viec_3.docx (4560 bytes), copied to Downloads, zipped & extracted"
+run_20261031_214332,32,2026-10-31T23:30:34.268759,git_ops,D:\KERNAL PROTECT\privacyguard,0.082,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,33,2026-10-31T23:34:54.997749,git_ops,D:\KERNAL PROTECT\privacyguard,0.076,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,34,2026-10-31T23:38:13.430154,git_ops,D:\KERNAL PROTECT\privacyguard,0.052,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,35,2026-10-31T23:41:09.460349,git_ops,D:\KERNAL PROTECT\privacyguard,0.094,SUCCESS,git status & diff executed cleanly
+run_20261031_214332,36,2026-10-31T23:43:25.386777,web_download,C:\Users\Tungminh\Downloads\BenignWorkload\web_download_5.html,0.340,SUCCESS,Downloaded 92702 bytes from https://www.google.com to Downloads

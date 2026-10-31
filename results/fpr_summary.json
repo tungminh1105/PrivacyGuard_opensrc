@@ -1,0 +1,33 @@
+{
+  "duration_min": 121.94,
+  "interval_sec": 60.0,
+  "db_path": "D:\\KERNAL PROTECT\\privacyguard\\data\\privacyguard.db",
+  "os_environment": "Windows 10 Pro (Build 19045, Windows-10-10.0.19045-SP0)",
+  "start_time": "2026-10-31T21:43:23.224861",
+  "end_time": "2026-10-31T23:45:19.883812",
+  "watermark_start": 955091,
+  "watermark_end": 990109,
+  "events_before": 225575,
+  "events_after": 260207,
+  "events_ingested": 34632,
+  "windows_before": 35442,
+  "windows_after": 108973,
+  "windows_evaluated": 73531,
+  "alerts_before": 5,
+  "alerts_after": 5,
+  "alerts_new": 0,
+  "fpr_per_1000_windows": 0.0,
+  "alerts_per_hour": 0.0,
+  "funnel_breakdown": {
+    "windows_created": 73531,
+    "no_proc_key": 0,
+    "not_direct_actor": 66361,
+    "ignored_process": 0,
+    "no_causal": 7170,
+    "bytes_below_min": 0,
+    "no_sensitive_file": 0,
+    "score_below_threshold": 0,
+    "duplicate": 0,
+    "alerts_created": 0
+  }
+}
