@@ -1,0 +1,50 @@
+{
+  "export_version": "1.0.0",
+  "timestamp": "2026-11-01T17:15:25.651991+00:00",
+  "commit_hash": "b358f2a36ffa8f4fceab122926b474f9859ef816",
+  "database": {
+    "path": "data/privacyguard.db",
+    "total_alerts": 8,
+    "total_events": 260384,
+    "synthetic_events": 0,
+    "all_sources_sysmon": true
+  },
+  "counts": {
+    "total_alerts": 8,
+    "reference_alerts": 5,
+    "phase3_alerts": 3,
+    "phase3_alert_ids": [
+      175,
+      176,
+      177
+    ],
+    "total_events": 260384
+  },
+  "metrics": {
+    "tpr": 1.0,
+    "tpr_display": "3/3 (100.0%)",
+    "tpr_scenarios_detected": 3,
+    "tpr_scenarios_total": 3,
+    "fpr_per_1000_windows": 0.0,
+    "fpr_display": "0/1.000 windows trong 121.94 phút",
+    "fpr_duration_min": 121.94,
+    "fpr_windows_evaluated": 73531,
+    "byte_diff_max": 0,
+    "all_sources_sysmon": true,
+    "synthetic_events": 0
+  },
+  "files": {
+    "phase3_summary.json": {
+      "sha256": "56aeb4e2f492971f12e0c6091db2bb6eaa14ca8a5195e49867bc33f109ea647d",
+      "size_bytes": 4687
+    },
+    "phase2_fpr_summary.json": {
+      "sha256": "036a42909ed84cdf060a80ee838c811d89dee55ef3b59b4890aeae7d0d2b518e",
+      "size_bytes": 921
+    },
+    "alerts_175_177.csv": {
+      "sha256": "016740569fccd7b87517fe7c73ecf46ae40ff52c784f4b6cdf0201420fa8568a",
+      "size_bytes": 10621
+    }
+  }
+}

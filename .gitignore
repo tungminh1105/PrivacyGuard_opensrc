@@ -32,6 +32,8 @@ results/*
 !results/*.csv
 !results/*.json
 !results/*.md
+!results/demo_export/
+!results/demo_export/**
 data/pytest_tmp/
 *.log
 data/*.log
