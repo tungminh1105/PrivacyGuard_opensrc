@@ -95,4 +95,23 @@ Because Sysmon lacks a `file_read` event provider (as detailed in Limitation 1),
   - Detection relies on temporal and spatial provenance: proving that process $P$ accessed sensitive file $F$ and subsequently initiated connection to socket $S$ within temporal window $\Delta t = 30s$ with outbound traffic volume $V$.
   - While this provides a strong causal chain without invading user privacy or breaking end-to-end encryption, it constitutes probabilistic causal correlation rather than cryptographic proof of payload plaintext.
 
+---
+
+## 11. Phase 3 MITRE ATT&CK Scope Boundaries & DNS Telemetry Gap
+
+- **Scope & Evaluated Techniques**:
+  - Phase 3 evaluates 3 sequential exfiltration techniques under real Microsoft Sysmon telemetry (`SysmonDrv/ETW`):
+    1. **T1560.001 (Archive via Utility)**: In-memory ZIP compression followed by socket exfiltration.
+    2. **T1041 (Exfiltration Over C2 Channel)**: Direct bulk socket transmission to destination port 8765.
+    3. **T1567 (Exfiltration Over Web Service)**: Flow-level HTTP POST payload transmission to an alternate port (8443).
+- **DNS Telemetry Gap (T1048 Not Evaluated)**:
+  - T1048 (Exfiltration Over Alternative Protocol, specifically DNS tunneling / DNS exfiltration) is explicitly excluded from Phase 3 evaluation.
+  - The current `config.yaml` and Sysmon parser only ingest Event IDs 1 (`ProcessCreate`), 3 (`NetworkConnect`), 5 (`ProcessTerminate`), and 11 (`FileCreate`). Sysmon Event ID 22 (`DNSEvent`) is not captured by the ingestion pipeline.
+  - Ingesting Event 22 requires modifying driver XML configurations and event schema parsing, which lies outside the scope of Phase 3. Synthetic DNS events will not be fabricated; this is tracked as a telemetry coverage gap for future development.
+- **Localhost Loopback Abstraction**:
+  - All test transmissions target `127.0.0.1` endpoints. While this accurately exercises network connect events and causal flow gates, it does not route across external Internet infrastructure or live adversary C2 servers.
+- **Flow-Level Inspection for Compressed Archives**:
+  - In T1560.001, PrivacyGuard detects exfiltration at the causal network flow level (sensitive file creation followed by bulk socket send by the same process lineage), without decompressing or inspecting ZIP payload contents.
+
+
 

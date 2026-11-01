@@ -31,6 +31,7 @@ data/fake_cloud/
 results/*
 !results/*.csv
 !results/*.json
+!results/*.md
 data/pytest_tmp/
 *.log
 data/*.log
