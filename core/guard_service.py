@@ -1,9 +1,10 @@
-"""Real-time Protection Pipeline Worker for PrivacyGuard (Commercial Upgrade).
+"""Real-time Protection Pipeline Worker for PrivacyGuard (M2 research prototype).
 
 Provides continuous monitoring:
 1. Periodic background polling of Windows Sysmon operational logs.
 2. Sliding window feature extraction on recent process activity.
-3. Multi-detector scoring (Rule-based engine and Autoencoder).
+3. Rule-based causal scoring (Autoencoder is an offline evaluation baseline,
+   not part of the live scan path).
 4. Automated persistence of High-Risk alerts into SQLite store.
 5. Windows Toast Notifications via winotify to inform user of data exfiltration.
 """
@@ -28,7 +29,6 @@ from core.provenance import build_provenance_graph
 from core.features import SlidingWindowFeatureExtractor, features_to_vector
 from core.explain import EvidenceExplainer, explain_alert, format_bytes_human
 from models.rules import RuleBasedDetector
-from models.autoencoder import AutoencoderDetector
 from core.sensitive import is_sensitive_path
 
 logger = logging.getLogger(__name__)

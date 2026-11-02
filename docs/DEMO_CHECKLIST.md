@@ -12,6 +12,11 @@ Tài liệu này cung cấp danh sách kiểm tra từng bước dành cho ngư�
   ```powershell
   # Kiểm tra và dừng tiến trình Streamlit cũ nếu có
   Get-Process streamlit -ErrorAction SilentlyContinue | Stop-Process -Force
+  # Dừng Tray App nếu đang chạy để tránh can thiệp vào canonical DB.
+  # Dùng CIM vì Windows PowerShell 5.1 không luôn có thuộc tính CommandLine trên Get-Process.
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'tray_app|cli\.py\s+tray' -or $_.Name -eq 'privacyguard.exe' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   ```
 - [ ] Kiểm tra cổng `8765`, `8443`, và `8501` đang ở trạng thái rảnh:
   ```powershell
@@ -43,17 +48,26 @@ Tài liệu này cung cấp danh sách kiểm tra từng bước dành cho ngư�
 
 ### 1.4. (Tùy chọn) Chuẩn bị nếu muốn Live Demo kích hoạt tấn công
 > [!CAUTION]
-> **QUY TẮC BẮT BUỘC**: Tuyệt đối **KHÔNG ĐƯỢC CHẠY** kịch bản tấn công trực tiếp trên tệp cơ sở dữ liệu chuẩn `data/privacyguard.db` vì sẽ làm sai lệch bộ 8 cảnh báo gốc (#170–#177).
+> **QUY TẮC BẮT BUỘC**: Tuyệt đối **KHÔNG ĐƯỢC CHẠY** kịch bản tấn công trực tiếp trên tệp cơ sở dữ liệu chuẩn `data/privacyguard.db` vì sẽ làm sai lệch bộ 10 cảnh báo hiện tại (#170–#179). Trong đó #170–#174 là baseline Phase 0.6, #175–#177 là bằng chứng Phase 3, còn #178–#179 là dấu vết của lần test-real cũ; không dùng #178–#179 làm bằng chứng Phase 3.
 
+- [ ] **BẮT BUỘC DỪNG TRAY APP TRƯỚC KHI CHẠY LIVE TEST**:
+  Nếu Tray App đang chạy nền, nó đang giám sát sự kiện Sysmon và sẽ ghi nhận alert vào canonical DB (`data/privacyguard.db`).
+  Chuột phải vào biểu tượng lá chắn khay hệ thống chọn **Thoát**, hoặc dừng tiến trình qua PowerShell trước khi chạy live test trên demo DB.
 - [ ] Nếu cần quay phân cảnh kích hoạt tấn công thời gian thực (Live Attack), phải sao chép DB chuẩn ra tệp tạm `data/demo.db`:
   ```powershell
   Copy-Item "data\privacyguard.db" "data\demo.db"
   ```
-- [ ] Khi chạy kịch bản, **CHỈ DÙNG** lệnh chỉ định rõ `--db data\demo.db`:
+  Baseline hiện tại của canonical là 10 alert (#170–#179), nên demo vừa copy sẽ có 10 alert; live test phải tăng đúng **+1** so với baseline, không hardcode alert ID.
+- [ ] Khi chạy kịch bản hoặc test-real, **CHỈ DÙNG** lệnh chỉ định rõ `--db data\demo.db`:
   ```powershell
-  # Chạy trên data/demo.db (KHÔNG dùng run_phase3_mitre.ps1 vì script đó trỏ vào DB chuẩn)
-  .\.venv\Scripts\python.exe scripts\run_mitre_scenarios.py --db data\demo.db --port 8765 --alt-port 8443
+  # Chạy test-real trên data/demo.db
+  .\.venv\Scripts\python.exe cli.py test-real --db data\demo.db --port 8765
   ```
+- [ ] **Kiểm tra dòng DB của Receiver trong console**:
+  Xác nhận log khởi động receiver in đúng đường dẫn cơ sở dữ liệu đích:
+  `[*] Bước 2: Khởi động TCP Receiver Server trên 127.0.0.1:8765...`
+  `    - Receiver DB: ...\data\demo.db`
+  Đảm bảo Receiver và Guard luôn ghi/đọc trên cùng một tệp DB.
 
 ---
 
@@ -89,11 +103,11 @@ Tài liệu này cung cấp danh sách kiểm tra từng bước dành cho ngư�
   Remove-Item "data\demo.db" -ErrorAction SilentlyContinue
   Remove-Item "data\demo.db*" -ErrorAction SilentlyContinue
   ```
-- [ ] Kiểm tra và xác nhận cơ sở dữ liệu chuẩn `data/privacyguard.db` vẫn nguyên vẹn 100% với đúng 8 cảnh báo (#170–#177):
+- [ ] Kiểm tra và xác nhận cơ sở dữ liệu chuẩn `data/privacyguard.db` vẫn nguyên vẹn 100% với đúng 10 cảnh báo hiện tại (#170–#179; #178–#179 là dấu vết test-real cũ, không phải bằng chứng Phase 3):
   ```powershell
-  .\.venv\Scripts\python.exe -c "import sqlite3; conn = sqlite3.connect('file:data/privacyguard.db?mode=ro', uri=True); ids = [r[0] for r in conn.execute('SELECT id FROM alerts ORDER BY id ASC').fetchall()]; print('Alerts in DB:', ids); assert ids == [170, 171, 172, 173, 174, 175, 176, 177], 'Mismatch!'; print('[OK] Database completely intact!')"
+  .\.venv\Scripts\python.exe -c "import sqlite3; conn = sqlite3.connect('file:data/privacyguard.db?mode=ro', uri=True); ids = [r[0] for r in conn.execute('SELECT id FROM alerts ORDER BY id ASC').fetchall()]; print('Alerts in DB:', ids); assert ids == [170, 171, 172, 173, 174, 175, 176, 177, 178, 179], 'Mismatch!'; print('[OK] Database completely intact!')"
   ```
-- [ ] Chạy lại bộ kiểm thử để đảm bảo 91 test tiếp tục PASS:
+- [ ] Chạy lại bộ kiểm thử để đảm bảo 98 test tiếp tục PASS:
   ```powershell
   .\.venv\Scripts\python.exe -m pytest -q
   ```

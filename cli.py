@@ -281,10 +281,11 @@ def is_tray_running() -> tuple[bool, Optional[int]]:
                 continue
             name = (p.info["name"] or "").lower()
             cmdline = [str(c).lower() for c in (p.info.get("cmdline") or [])]
+            cmdline_str = " ".join(cmdline)
             if "privacyguard" in name:
                 if len(cmdline) <= 1 or any("tray" in c for c in cmdline):
                     return True, p.info["pid"]
-            elif any("tray_app" in c for c in cmdline):
+            elif any("tray_app" in c for c in cmdline) or ("cli.py" in cmdline_str and "tray" in cmdline_str):
                 return True, p.info["pid"]
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -742,6 +743,24 @@ def cmd_test_real(args: argparse.Namespace) -> None:
     print(f"[*] Target Database:      {db_path}")
     print(f"[*] Receiver Port:        {port}")
 
+    # Check Tray App: Prevent tray app from interfering with canonical DB
+    tray_active, tray_pid = is_tray_running()
+    if tray_active:
+        print(f"[-] [FAIL] Phát hiện ứng dụng Tray App đang hoạt động (PID: {tray_pid}).")
+        print("    Tray App đang giám sát và có thể can thiệp/tạo cảnh báo vào cơ sở dữ liệu canonical.")
+        print("    Vui lòng đóng Tray App (chuột phải biểu tượng lá chắn khay hệ thống chọn Thoát)")
+        print("    trước khi thực hiện live test.")
+        sys.exit(1)
+
+    # Step 2a: Reject an occupied port before opening the target DB or starting
+    # the guard. This makes the failure path deterministic and avoids creating
+    # an empty DB when another process owns the receiver port.
+    if is_port_listening("127.0.0.1", port):
+        print(f"[-] [FAIL] Cổng {port} đang bị chiếm dụng bởi tiến trình khác.")
+        print(f"    Không thể đảm bảo tiến trình đó ghi log vào đúng DB đích: {db_path}")
+        print(f"    Vui lòng kiểm tra và đóng tiến trình đang chiếm cổng {port} rồi chạy lại.")
+        sys.exit(1)
+
     def is_admin() -> bool:
         try:
             import ctypes
@@ -779,22 +798,29 @@ def cmd_test_real(args: argparse.Namespace) -> None:
     print("[*] Bước 1: Tạo/đảm bảo tài liệu nhạy cảm trong data/FakeDocuments...")
     create_fake_documents(target_dir="data/FakeDocuments", count=20)
 
-    # Step 2: Ensure receiver is running
+    # Step 2: Start an in-process receiver bound to the exact target database
+    from simulator.receiver import ReceiverServer
+
+    receiver_server: Optional[ReceiverServer] = None
+    print(f"[*] Bước 2: Khởi động TCP Receiver Server trên 127.0.0.1:{port}...")
+    print(f"    - Receiver DB: {db_path}")
+    receiver_server = ReceiverServer(host="127.0.0.1", ports=[port], db_path=str(db_path))
+    receiver_server.start()
+    time.sleep(0.5)
+
+    if port not in receiver_server.listening_ports:
+        print(f"[-] [FAIL] Receiver không thể mở cổng {port}. Cổng có thể đã bị chiếm dụng.")
+        receiver_server.stop()
+        guard.stop()
+        store.close()
+        sys.exit(1)
+
+    print(f"[+] Receiver Server đang lắng nghe trên 127.0.0.1:{port} (DB: {db_path})")
+
     py_exec = sys.executable
     if getattr(sys, "frozen", False):
         venv_py = os.path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe")
         py_exec = venv_py if os.path.exists(venv_py) else "python"
-
-    receiver_proc = None
-    if not is_port_listening("127.0.0.1", port):
-        print(f"[*] Bước 2: Khởi động TCP Receiver Server trên 127.0.0.1:{port}...")
-        receiver_proc = subprocess.Popen(
-            [py_exec, "simulator/receiver.py", "--port", str(port)],
-            cwd=PROJECT_ROOT,
-        )
-        time.sleep(1.0)
-    else:
-        print(f"[*] Bước 2: Receiver Server đã đang lắng nghe trên cổng {port}.")
 
     try:
         # Step 3: Run leaker scenario 1 in a separate process
@@ -928,11 +954,14 @@ def cmd_test_real(args: argparse.Namespace) -> None:
         print("=" * 65 + "\n")
 
     finally:
-        if receiver_proc is not None:
+        try:
+            guard.stop()
+        except Exception:
+            pass
+        if receiver_server is not None:
             print("[*] Đóng TCP Receiver Server...")
             try:
-                receiver_proc.terminate()
-                receiver_proc.wait(timeout=2.0)
+                receiver_server.stop()
             except Exception:
                 pass
         store.close()

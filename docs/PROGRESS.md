@@ -26,11 +26,12 @@
   - 42/42 unit tests passed (35 cũ + 7 mới cho Phase D).
 - Giai đoạn E (Evidence Explanation & Streamlit Dashboard): HOÀN TẤT cài đặt và kiểm thử.
   - core/explain.py: Chuyển đổi điểm bất thường số học thành chuỗi dẫn chứng trực quan, có cấu trúc; chuẩn hóa định dạng câu tường thuật theo SPEC; ẩn danh hóa đường dẫn người dùng (`C:\Users\***\...`); sinh lệnh firewall mẫu (netsh) an toàn.
-  - ui/app.py: Dashboard 4 tab bằng Streamlit & Plotly theo SPEC mục 10:
+  - ui/app.py: Dashboard 5 tab bằng Streamlit & Plotly:
     + Tab 1: Tổng quan (Overview) - Metrics hệ thống, biểu đồ phân bố rủi ro theo tiến trình, cảnh báo gần nhất.
     + Tab 2: Dòng thời gian & Cảnh báo (Timeline & Alerts) - Lọc theo thời gian & mức độ rủi ro, xem chuỗi chứng cứ chi tiết, nút sinh lệnh chặn mạng an toàn (chỉ copy, không tự chạy).
     + Tab 3: Đồ thị nhân quả (Provenance Graph Viewer) - Trực quan hóa NetworkX DiGraph qua Plotly với phân tầng File -> Process -> Network Socket và đánh dấu cạnh CAUSAL_FLOW.
-    + Tab 4: Kết quả đánh giá mô hình (Model Evaluation) - Bảng và biểu đồ trực quan summary.csv, radar chart đa chiều, per_scenario.csv, phân tích độ trễ.
+    + Tab 4: Kết quả đánh giá mô hình (Model Evaluation) - Bảng và biểu đồ trực quan summary.csv, per_scenario.csv, phân tích độ trễ; ghi rõ baseline offline.
+    + Tab 5: Chẩn đoán & Phễu bảo vệ (Diagnostics & Funnel) - Trạng thái Sysmon, watermark, receiver logs và phễu 6 cổng.
   - tests/test_explain.py: 5 unit tests mới kiểm tra định dạng narrative, path redaction, missing fields robustness, và firewall rule formatting.
   - 47/47 unit tests passed (42 cũ + 5 mới).
 - Giai đoạn F (System Overhead Benchmark, Final Integration & Packaging): HOÀN TẤT TOÀN DIỆN DỰ ÁN.
@@ -42,11 +43,11 @@
   - docs/LIMITATIONS.md: Bổ sung mục 8, 9, 10 tổng kết trung thực các giới hạn kỹ thuật (Autoencoder với trickle/beaconing, quyền Admin, và tương quan nhân quả không giải mã HTTPS).
   - 50/50 unit & integration tests passed.
 - Nâng cấp Thương mại (Commercial Upgrade - Real-time Protection & System Tray):
-  - core/guard_service.py: Xây dựng daemon giám sát thường trực thời gian thực (background thread): tự động poll Sysmon watermark, trích xuất đặc trưng cửa sổ trượt, chấm điểm rủi ro bằng RuleBasedDetector và Autoencoder, lưu trữ vào bảng alerts và kích hoạt thông báo Windows Toast (winotify).
+  - core/guard_service.py: Xây dựng daemon giám sát thường trực thời gian thực (background thread): tự động poll Sysmon watermark, trích xuất đặc trưng cửa sổ trượt, chấm điểm rủi ro bằng RuleBasedDetector, lưu trữ vào bảng alerts và kích hoạt thông báo Windows Toast (winotify). Autoencoder chỉ là baseline offline trong eval, không nằm trong scan_now.
   - ui/tray_app.py: Biểu tượng bảo vệ lá chắn dưới khay hệ thống (pystray & Pillow) với menu chuột phải điều khiển trạng thái (Running/Paused), bật nhanh Web Dashboard, quét ngay lập tức (Scan Now), hiển thị số lượng cảnh báo.
   - cli.py: Khởi chạy mặc định System Tray App khi chạy không có tham số (`python cli.py` hoặc nhấp đúp `privacyguard.exe`).
   - tests/test_guard_service.py: 4 unit tests mới kiểm tra việc phát hiện và ghi nhận cảnh báo tự động, tạm dừng/tiếp tục, sinh icon lá chắn và thông báo toast.
-  - 54/54 tests passed (100% tests toàn bộ dự án).
-- Toàn bộ các giai đoạn và nâng cấp thương mại đã hoàn thành xuất sắc, sẵn sàng 100% cho báo cáo và demo thi KHKT.
+  - 98/98 tests passed (tại thời điểm cập nhật).
+- Dự án đạt mức trưởng thành M2: prototype nghiên cứu sẵn sàng demo trong phạm vi hẹp; không phải sản phẩm thương mại và không khái quát hóa FPR = 0 ra ngoài tập test.
 - Sysmon: đang cài, tự chạy khi khởi động máy.
 - Quy tắc: không chạy phân tích rò rỉ trước khi có ground truth.

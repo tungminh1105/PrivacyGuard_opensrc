@@ -4,7 +4,7 @@ Streamlit application adhering strictly to SPEC Section 10 & Commercial UX Redes
 - Tab 1: 🛡️ Tổng quan bảo vệ (Overview with Friendly Metric Cards & Top Suspicious Apps)
 - Tab 2: 🚨 Nhật ký & Xử lý nguy cơ (Timeline, Storytelling Evidence, 1-Click Windows Firewall Blocking)
 - Tab 3: 🗺️ Sơ đồ đường đi của dữ liệu (3-Column Data Flow Map with Color-Coded Legend)
-- Tab 4: 🧪 Khoa học & So sánh hiệu năng AI (Scientific Benchmarks, Metric Simplifications for Judges)
+- Tab 4: 🧪 Khoa học & So sánh mô hình (Scientific Benchmarks, Offline Baselines)
 """
 
 from __future__ import annotations
@@ -32,8 +32,11 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from core.explain import explain_alert, sanitize_user_path, format_bytes_human
+from core.paths import get_default_db_path
 from core.provenance import build_provenance_graph
 from eval.metrics import SCENARIO_NAMES
+
+CANONICAL_DB = get_default_db_path()
 
 logger = logging.getLogger(__name__)
 
@@ -405,14 +408,14 @@ def build_scenario_provenance_graph(alert: Dict[str, Any]) -> nx.DiGraph:
 
 # Header & Title
 st.markdown('<div class="main-title">🛡️ PrivacyGuard - Hệ Thống Giám Sát & Ngăn Chặn Gửi Trộm Dữ Liệu</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Bảo vệ quyền riêng tư cá nhân & Phát hiện kẻ gian gửi trộm dữ liệu qua Sơ đồ đường đi dữ liệu (Data Flow Map) và Trí tuệ Nhân tạo</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Bảo vệ quyền riêng tư cá nhân & Phát hiện gửi trộm dữ liệu qua Sơ đồ đường đi dữ liệu (Data Flow Map) và phân tích nhân quả; so sánh với baseline AI/ML offline</div>', unsafe_allow_html=True)
 
 # Tabs
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🛡️ 1. Tổng quan bảo vệ",
     "🚨 2. Nhật ký & Xử lý nguy cơ",
     "🗺️ 3. Sơ đồ đường đi của dữ liệu",
-    "🧪 4. Khoa học & So sánh hiệu năng AI",
+    "🧪 4. Khoa học & So sánh mô hình",
     "🔍 5. Chẩn đoán & Phễu bảo vệ",
 ])
 
@@ -667,7 +670,7 @@ with tab2:
 
                 st.write(f"- **Địa chỉ máy chủ:** `{d_str}` ({c_domain})")
                 st.write(f"- **Dung lượng đã gửi:** **{b_fmt}**")
-                st.write(f"- **Đánh giá rủi ro của AI:** `{risk_pct}/100`")
+                st.write(f"- **Đánh giá rủi ro rule-based:** `{risk_pct}/100`")
 
             # Emergency Action Section
             st.markdown("---")
@@ -872,25 +875,32 @@ with tab3:
         st.info("Chưa có sự vụ để dựng sơ đồ đường đi dữ liệu.")
 
 # ==============================================================================
-# TAB 4: KHOA HỌC & SO SÁNH HIỆU NĂNG AI (DÀNH CHO GIÁM KHẢO)
+# TAB 4: KHOA HỌC & SO SÁNH MÔ HÌNH (DÀNH CHO GIÁM KHẢO)
 # ==============================================================================
 with tab4:
-    st.markdown("### 🧪 Khoa Học & So Sánh Hiệu Năng Các Mô Hình AI (Dành Cho Ban Giám Khảo)")
-    st.caption("Đánh giá thực nghiệm khách quan trên tập dữ liệu kiểm thử (Test Set, N = 285) giữa 3 thế hệ phương pháp.")
+    st.markdown("### 🧪 Khoa Học & So Sánh Hiệu Năng Các Mô Hình (Dành Cho Ban Giám Khảo)")
+    st.caption(
+        "Đánh giá offline trên test set (N = 285) giữa Rule-based causal, Isolation Forest và Autoencoder. "
+        "Detector realtime của PrivacyGuard là Rule-based causal; Isolation Forest và Autoencoder chỉ là baseline đối chứng."
+    )
 
     # Friendly Explanation Box
     st.markdown(
         """
         <div class="callout-box">
-            <h4 style="margin-top:0; color:#60A5FA;">💡 Tại Sao Đồ Thị Nhân Quả Lại Thông Minh Hơn Deep Learning Thuần Túy?</h4>
+            <h4 style="margin-top:0; color:#60A5FA;">💡 Vì Sao Phân Tích Nhân Quả Giúp Ích?</h4>
             <p style="margin-bottom:8px; line-height:1.6;">
-                Khi kẻ trộm sử dụng các chiêu thức tinh vi như <b>gửi nhỏ giọt từng phần dữ liệu nhỏ (Drip Exfiltration - Kịch bản 2)</b> 
-                hoặc <b>gửi ngắt quãng theo chu kỳ (Periodic Beaconing - Kịch bản 6)</b>:
+                Với các kiểu rò rỉ <b>gửi nhỏ giọt (Drip Exfiltration - Kịch bản 2)</b> hoặc
+                <b>gửi ngắt quãng theo chu kỳ (Periodic Beaconing - Kịch bản 6)</b>, mô hình học trên
+                vector đặc trưng thống kê có thể bỏ sót vì lưu lượng mỗi lần gửi rất nhỏ.
             </p>
             <ul style="margin-bottom:0; line-height:1.6;">
-                <li><b>Mô hình Deep Learning Autoencoder</b> thuần túy chỉ nhìn vào đặc trưng thống kê số lượng bytes nên bị đánh lừa: lượng dữ liệu gửi đi quá nhỏ, trông y hệt các gói tin lướt web bình thường, dẫn tới <b>bỏ sót tới ~35% vụ rò rỉ dữ liệu</b>.</li>
-                <li><b>Đồ thị nhân quả (Data Flow Map)</b> của PrivacyGuard theo dõi toàn bộ đường đi logic: dù kẻ trộm gửi chỉ 1 byte, liên kết nhân quả giữa tệp nhạy cảm vừa mở và cổng mạng vẫn tồn tại. Nhờ đó, hệ thống bắt trọn vẹn 100% các hành vi rò rỉ tinh vi mà <b>hoàn toàn không báo nhầm (FPR = 0.0%)</b>.</li>
+                <li><b>Rule-based causal (detector realtime):</b> giữ liên kết logic giữa tệp nhạy cảm, tiến trình và kết nối mạng, nên không phụ thuộc duy nhất vào ngưỡng byte.</li>
+                <li><b>Isolation Forest và Autoencoder:</b> là baseline offline để đối chứng, không phải detector đang chạy realtime. Autoencoder hiện yếu hơn ở slow trickle/beaconing; số liệu cụ thể lấy trực tiếp từ <code>results/summary.csv</code> và <code>results/per_scenario.csv</code>.</li>
             </ul>
+            <p style="margin-top:8px; margin-bottom:0; line-height:1.6; color:#F59E0B;">
+                <b>Lưu ý:</b> FPR = 0 của Rule-based chỉ đúng trên test set hiện tại, không phải bảo đảm chung cho mọi môi trường.
+            </p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -898,15 +908,17 @@ with tab4:
 
     summary_file = "results/summary.csv"
     per_sc_file = "results/per_scenario.csv"
+    df_summary = None
 
     if os.path.exists(summary_file):
         df_summary = pd.read_csv(summary_file)
 
         st.markdown("#### 1. Bảng Xếp Hạng & So Sánh Hiệu Năng 3 Mô Hình")
 
-        # Friendly simplified comparison table
+        # Rank strictly by the measured F1 score in results/summary.csv.
         friendly_rows = []
-        for _, row in df_summary.iterrows():
+        df_ranked = df_summary.sort_values("f1", ascending=False).reset_index(drop=True)
+        for rank_idx, row in df_ranked.iterrows():
             det = row["detector"]
             rec = row["recall"] * 100
             fpr = row["fpr"] * 100
@@ -914,25 +926,31 @@ with tab4:
             prec = row["precision"] * 100
 
             if det == "RuleBased":
-                det_name = "🛡️ Đồ Thị Nhân Quả (PrivacyGuard Causal)"
-                rank = "⭐⭐⭐⭐⭐ Hạng 1 (Xuất sắc)"
-                strength = "Bắt trọn 100% rò rỉ, không báo nhầm dù gửi nhỏ giọt"
+                det_name = "🛡️ Rule-based Causal (Live Detector)"
+                strength = (
+                    f"Detector realtime; F1 {f1:.1f}%, Recall {rec:.1f}%, "
+                    f"FPR {fpr:.1f}% trên test set."
+                )
             elif det == "IsolationForest":
-                det_name = "🌲 Rừng Cô Lập (Isolation Forest - ML)"
-                rank = "⭐⭐⭐⭐ Hạng 2 (Khá)"
-                strength = "Phát hiện dị biệt đa chiều tốt, thỉnh thoảng báo nhầm"
+                det_name = "🌲 Isolation Forest (ML Baseline)"
+                strength = (
+                    f"Baseline ML offline; F1 {f1:.1f}%, Recall {rec:.1f}%, "
+                    f"FPR {fpr:.1f}%."
+                )
             else:
-                det_name = "🧠 Học Sâu Tự Mã Hóa (Autoencoder - DL)"
-                rank = "⭐⭐⭐ Hạng 3 (Trung bình)"
-                strength = "Tốt khi gửi đột biến lớn, bị qua mặt khi gửi nhỏ giọt"
+                det_name = "🧠 Autoencoder (DL Baseline)"
+                strength = (
+                    f"Baseline DL offline; F1 {f1:.1f}%, Recall {rec:.1f}%, "
+                    f"FPR {fpr:.1f}%; yếu ở slow trickle/beaconing."
+                )
 
             friendly_rows.append({
                 "Phương Pháp / Mô Hình": det_name,
-                "Xếp Hạng Độ Chính Xác": rank,
-                "Khả Năng Bắt Trộm (Recall)": f"{rec:.1f}%",
-                "Tỷ Lệ Báo Động Nhầm (FPR)": f"{fpr:.1f}%",
-                "Điểm Tổng Hợp F1": f"{f1:.1f}%",
-                "Độ Chuẩn Xác (Precision)": f"{prec:.1f}%",
+                "Xếp Hạng Theo F1": f"Hạng {rank_idx + 1}/3",
+                "Recall": f"{rec:.1f}%",
+                "FPR": f"{fpr:.1f}%",
+                "F1": f"{f1:.1f}%",
+                "Precision": f"{prec:.1f}%",
                 "Đặc Điểm Nổi Bật": strength,
             })
 
@@ -1006,30 +1024,58 @@ with tab4:
         df_per_sc_display = df_per_sc.copy()
         df_per_sc_display.rename(columns={
             "scenario": "Mã Kịch Bản",
-            "name": "Tên Kịch Bản Thực Nghiệm",
-            "type": "Loại Hành Vi",
-            "RuleBased_rate": "🛡️ Đồ Thị Nhân Quả",
-            "IsolationForest_rate": "🌲 Rừng Cô Lập (IForest)",
-            "Autoencoder_rate": "🧠 Học Sâu Autoencoder",
+            "scenario_name": "Tên Kịch Bản Thực Nghiệm",
+            "RuleBased_rate": "🛡️ Rule-based Causal",
+            "IsolationForest_rate": "🌲 Isolation Forest",
+            "Autoencoder_rate": "🧠 Autoencoder",
         }, inplace=True)
 
         st.dataframe(
             df_per_sc_display.style.format({
-                "🛡️ Đồ Thị Nhân Quả": "{:.1%}",
-                "🌲 Rừng Cô Lập (IForest)": "{:.1%}",
-                "🧠 Học Sâu Autoencoder": "{:.1%}",
+                "🛡️ Rule-based Causal": "{:.1%}",
+                "🌲 Isolation Forest": "{:.1%}",
+                "🧠 Autoencoder": "{:.1%}",
             }),
             use_container_width=True,
             hide_index=True,
         )
 
-        st.markdown(
-            r"""
-            **Kết luận khoa học quan trọng:**
-            - **Đồ thị nhân quả (Rule-based Causal):** Đạt $F_1 = 98.97\%$ và $FPR = 0.0\%$. Khả năng bóc tách đường truyền dữ liệu thực tế giúp phân biệt tuyệt đối giữa hành động sao lưu hợp pháp (Kịch bản 7 - OneDrive Sync lành tính) và rò rỉ ngụy trang.
-            - **Autoencoder (Deep Learning):** Gặp hiện tượng **'Mù rò rỉ nhỏ giọt'** ở Kịch bản 2 ($45.8\%$) và Kịch bản 6 ($16.7\%$). Điều này chứng minh rằng trong bài toán chống thất thoát dữ liệu (DLP), biểu diễn nhân quả có ưu thế vượt trội so với các mô hình hộp đen chỉ học trên phân phối số lượng bytes.
-            """
-        )
+        def _rate(scenario_id: int, column: str) -> float:
+            values = df_per_sc.loc[df_per_sc["scenario"] == scenario_id, column]
+            return float(values.iloc[0]) if len(values) else 0.0
+
+        ae_s2 = _rate(2, "Autoencoder_rate")
+        ae_s6 = _rate(6, "Autoencoder_rate")
+        rule_s2 = _rate(2, "RuleBased_rate")
+        rule_s6 = _rate(6, "RuleBased_rate")
+
+        if df_summary is not None:
+            rule_row = df_summary[df_summary["detector"] == "RuleBased"].iloc[0]
+            ae_row = df_summary[df_summary["detector"] == "Autoencoder"].iloc[0]
+            rule_f1 = rule_row["f1"] * 100
+            rule_recall = rule_row["recall"] * 100
+            rule_fpr = rule_row["fpr"] * 100
+            ae_f1 = ae_row["f1"] * 100
+            ae_recall = ae_row["recall"] * 100
+            ae_fpr = ae_row["fpr"] * 100
+
+            st.markdown(
+                f"""
+                **Kết luận khoa học (lấy trực tiếp từ CSV hiện tại):**
+                - **Rule-based causal (live detector):** F1 = {rule_f1:.2f}%, Recall = {rule_recall:.2f}%, FPR = {rule_fpr:.2f}% trên test set. FPR = 0 chỉ đúng trên tập test này, không phải bảo đảm chung.
+                - **Autoencoder (DL baseline offline):** F1 = {ae_f1:.2f}%, Recall = {ae_recall:.2f}%, FPR = {ae_fpr:.2f}%; tỷ lệ phát hiện Scenario 2 = {ae_s2:.1%}, Scenario 6 = {ae_s6:.1%}. Đây là baseline đối chứng, không phải detector realtime.
+                - **So sánh trong phạm vi hiện tại:** Rule-based causal xử lý slow trickle/beaconing tốt hơn (Scenario 2 = {rule_s2:.1%}, Scenario 6 = {rule_s6:.1%}) và giữ được liên kết file → process → network. Không khái quát hóa ra ngoài tập dữ liệu này.
+                """
+            )
+        else:
+            st.markdown(
+                f"""
+                **Kết luận từ per_scenario.csv:**
+                - Rule-based causal: Scenario 2 = {rule_s2:.1%}, Scenario 6 = {rule_s6:.1%}.
+                - Autoencoder (baseline offline): Scenario 2 = {ae_s2:.1%}, Scenario 6 = {ae_s6:.1%}.
+                - Không có summary.csv để trích F1/FPR; không đưa ra kết luận định lượng ngoài bảng trên.
+                """
+            )
 
 # ==============================================================================
 # TAB 5: CHẨN ĐOÁN & PHỄU BẢO VỆ (DIAGNOSTICS & FUNNEL)
@@ -1107,7 +1153,7 @@ with tab5:
 
     st.markdown("---")
     st.markdown("#### 1. Phễu Kiểm Soát 6 Cổng Bảo Vệ (Security Funnel)")
-    st.caption("Dữ liệu telemetry của mọi tiến trình phải vượt qua 5 cổng kiểm soát và 1 cổng đánh giá AI để trở thành cảnh báo chính thức:")
+    st.caption("Dữ liệu telemetry của mọi tiến trình phải vượt qua 5 cổng kiểm soát và 1 cổng đánh giá rule-based để trở thành cảnh báo chính thức:")
 
     recent_stats = st_store.get_recent_scan_stats(seconds=300.0)
     if recent_stats:
@@ -1138,7 +1184,7 @@ with tab5:
         {"Cổng Kiểm Soát": "Cổng 2: Kiểm tra Luồng nhân quả (Causal)", "Số Lượng": agg.get("no_causal", 0), "Ý Nghĩa & Mục Đích": "Loại bỏ tiến trình chỉ gửi mạng độc lập không liên quan đọc file"},
         {"Cổng Kiểm Soát": "Cổng 3: Ngưỡng dung lượng (>= 1024B)", "Số Lượng": agg.get("bytes_below_min", 0), "Ý Nghĩa & Mục Đích": "Loại bỏ kết nối rỗng, keep-alive (0 bytes) chống alert storm"},
         {"Cổng Kiểm Soát": "Cổng 4: Chạm tệp tài liệu nhạy cảm", "Số Lượng": agg.get("no_sensitive_file", 0), "Ý Nghĩa & Mục Đích": "Loại bỏ hoạt động tải file thường, cập nhật hệ thống Windows"},
-        {"Cổng Kiểm Soát": "Cổng 5: Đánh giá Rủi ro AI (>= 70%)", "Số Lượng": agg.get("score_below_threshold", 0), "Ý Nghĩa & Mục Đích": "Mô hình đồ thị chấm điểm hành vi nguy hiểm mức cao"},
+        {"Cổng Kiểm Soát": "Cổng 5: Đánh giá Rủi ro Rule-based (>= 70%)", "Số Lượng": agg.get("score_below_threshold", 0), "Ý Nghĩa & Mục Đích": "Mô hình rule-based chấm điểm hành vi nguy hiểm mức cao"},
         {"Cổng Kiểm Soát": "Cổng 6: Khử trùng lặp (Cooldown 600s)", "Số Lượng": agg.get("duplicate", 0), "Ý Nghĩa & Mục Đích": "Chặn bắn lặp cảnh báo cho cùng một hành vi trong 10 phút"},
         {"Cổng Kiểm Soát": "🎯 CẢNH BÁO TẠO THÀNH CÔNG", "Số Lượng": agg.get("alerts_created", 0), "Ý Nghĩa & Mục Đích": "Được ghi vào DB và gửi Windows Toast Notification"},
     ]

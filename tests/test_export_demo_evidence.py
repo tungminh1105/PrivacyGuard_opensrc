@@ -75,8 +75,9 @@ class TestExportDemoEvidence:
         assert metrics["all_sources_sysmon"] is True
         assert metrics["synthetic_events"] == 0
 
-        # Counts: alerts #175-#177
-        assert counts["total_alerts"] == 8
+        # Canonical DB is frozen at 10 alerts (#170-#179). Any additional alert
+        # indicates an accidental write to the canonical DB and must fail this test.
+        assert counts["total_alerts"] == 10
         assert counts["reference_alerts"] == 5
         assert counts["phase3_alerts"] == 3
         assert counts["phase3_alert_ids"] == [175, 176, 177]

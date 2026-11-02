@@ -2,7 +2,7 @@
 
 > **Dự án Nghiên cứu Khoa học Kỹ thuật (KHKT)**  
 > **Lĩnh vực**: Hệ thống phần mềm & An toàn thông tin (Software Systems & Cybersecurity)  
-> **Phương pháp tiếp cận**: Phân tích nhân quả luồng dữ liệu (Data Provenance), Trích xuất đặc trưng thời gian (Temporal Sliding Windows), Học máy/Học sâu (Isolation Forest, MLP Autoencoder, Rule-based Engine) và Giám sát thường trực thời gian thực với Biểu tượng khay hệ thống (Real-time System Tray Guard).
+> **Phương pháp tiếp cận**: Phân tích nhân quả luồng dữ liệu (Data Provenance), Trích xuất đặc trưng thời gian (Temporal Sliding Windows), Rule-based causal detector cho realtime, cùng các baseline Học máy/Học sâu (Isolation Forest, MLP Autoencoder) được đánh giá offline. Giám sát thường trực thời gian thực với Biểu tượng khay hệ thống (Real-time System Tray Guard).
 
 ---
 
@@ -18,12 +18,12 @@ Trong kỷ nguyên số, các vụ rò rỉ dữ liệu cá nhân (Personal Iden
 PrivacyGuard xây dựng một kiến trúc bảo vệ toàn diện với các đóng góp cốt lõi:
 1. **Bảo vệ quyền riêng tư tuyệt đối (Privacy-Preserving)**: Không can thiệp giải mã gói tin (SSL/TLS Inspection), thay vào đó phát hiện bất thường dựa trên **quan hệ nhân quả luồng sự kiện (Event Causality Correlation)**.
 2. **Đồ thị nhân quả dữ liệu (Data Provenance Graph)**: Dựng đồ thị có hướng (`NetworkX DiGraph`) phân cấp 3 tầng (*Sensitive File* $\rightarrow$ *Process Tree* $\rightarrow$ *Network Socket*) trong cửa sổ thời gian $\Delta t = 30s$ để chứng minh nguồn gốc dữ liệu.
-3. **Phát hiện đa tầng (3-Tier Detection Architecture)**:
-   - **Tầng 1 (Rule-based Baseline)**: Đánh giá tức thì dựa trên luật cứng, ngưỡng nhạy cảm và tính mới của IP đích.
-   - **Tầng 2 (Isolation Forest)**: Học không giám sát (*Unsupervised One-class*) trên không gian đặc trưng 17 chiều từ hành vi lành tính.
-   - **Tầng 3 (MLP Autoencoder)**: Mạng nơ-ron học sâu tính toán sai số tái tạo (*MSE Reconstruction Error*) để nhận diện các bất thường phi tuyến tính.
+3. **Khung phát hiện và đối chứng mô hình**:
+   - **Rule-based causal (live detector)**: Đánh giá tức thì dựa trên luật cứng, ngưỡng nhạy cảm, luồng nhân quả và tính mới của IP đích. Đây là mô hình đang chạy trong `RealtimeGuardService`.
+   - **Isolation Forest (offline baseline)**: Học không giám sát (*Unsupervised One-class*) trên không gian đặc trưng 17 chiều từ hành vi lành tính, dùng để so sánh trong `eval/run_experiments.py`.
+   - **MLP Autoencoder (offline baseline)**: Mạng nơ-ron học sâu tính toán sai số tái tạo (*MSE Reconstruction Error*), dùng để so sánh offline; không nằm trong đường phát hiện realtime.
 4. **Giải thích chuỗi bằng chứng (Explainable AI - XAI)**: Chuyển đổi điểm số toán học thành chuỗi lập luận tự nhiên, trực quan hóa đồ thị nhân quả trên giao diện Streamlit và đề xuất lệnh chặn tường lửa an toàn.
-5. **Cấp độ thương mại (Commercial Real-time Protection & System Tray)**: Daemon giám sát nền thời gian thực thu nhỏ xuống khay hệ thống Windows cạnh đồng hồ, tự động bắn thông báo Windows Toast khi phát hiện rò rỉ.
+5. **Mức trưởng thành M2 (Real-time Protection & System Tray trong phạm vi hẹp)**: Daemon giám sát nền thời gian thực thu nhỏ xuống khay hệ thống Windows cạnh đồng hồ, tự động bắn thông báo Windows Toast khi phát hiện rò rỉ. Đây là prototype nghiên cứu, chưa phải sản phẩm thương mại.
 
 ---
 
@@ -55,10 +55,10 @@ PrivacyGuard xây dựng một kiến trúc bảo vệ toàn diện với các �
                                          |
                                          v
 +-----------------------------------------------------------------------------------+
-| 3. MULTI-MODEL DETECTION ENGINE (models/)                                         |
-|    - Rule-based Detector: Ngưỡng dung lượng, file nhạy cảm, IP mới                |
-|    - Isolation Forest (n_estimators=200): Học trên tập mẫu lành tính thuần túy   |
-|    - PyTorch MLP Autoencoder (17 -> 8 -> 4 -> 8 -> 17): MSE Reconstruction Error   |
+| 3. LIVE DETECTION + OFFLINE MODEL EVALUATION (models/)                            |
+|    - Live: Rule-based causal detector (ngưỡng, file nhạy cảm, causal flow, IP mới)|
+|    - Offline baseline: Isolation Forest (n_estimators=200)                        |
+|    - Offline baseline: PyTorch MLP Autoencoder (17 -> 8 -> 4 -> 8 -> 17)          |
 +-----------------------------------------------------------------------------------+
                                          |
                                          v
@@ -66,7 +66,7 @@ PrivacyGuard xây dựng một kiến trúc bảo vệ toàn diện với các �
 | 4. GIAO DIỆN & TƯƠNG TÁC NGƯỜI DÙNG (ui/)                                         |
 |    - ui/tray_app.py: Biểu tượng lá chắn bảo vệ dưới khay hệ thống (System Tray)   |
 |    - Windows Toast Notification (winotify): Báo động rò rỉ dữ liệu tức thì         |
-|    - ui/app.py: Dashboard 4 tab (Overview, Timeline, Provenance Graph, Evaluation) |
+|    - ui/app.py: Dashboard 5 tab (Overview, Timeline, Provenance, Evaluation, Funnel)|
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -243,9 +243,9 @@ privacyguard/
 │   ├── run_experiments.py    # Pipeline thực nghiệm và xuất bảng so sánh
 │   └── overhead.py           # Đo lường tài nguyên CPU, RAM, Drop Ratio, I/O
 ├── ui/
-│   ├── app.py                # Dashboard trực quan tương tác 4 tab Streamlit
+│   ├── app.py                # Dashboard trực quan tương tác 5 tab Streamlit
 │   └── tray_app.py           # Ứng dụng khay hệ thống Windows (pystray & Pillow)
-├── tests/                    # 54 unit & integration tests (100% PASS)
+├── tests/                    # 98 unit & integration tests (100% PASS)
 ├── docs/
 │   ├── SPEC.md               # Đặc tả kỹ thuật đề tài
 │   ├── PROGRESS.md           # Nhật ký tiến độ chi tiết từng giai đoạn
