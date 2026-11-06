@@ -38,3 +38,7 @@ data/pytest_tmp/
 *.log
 data/*.log
 
+# Never publish local captures, scratch tests, or legacy result files
+data/
+results/benign_actions_old.csv
+
